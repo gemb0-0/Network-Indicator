@@ -166,6 +166,17 @@ PluginComponent {
         return max > 0 ? max : 1;
     }
 
+    // ── Get overall usage across all stored days (up to 30) ──
+    function getOverallUsage() {
+        if (!usageData || !usageData.days) return { total: 0, dayCount: 0 };
+        var sum = 0;
+        var keys = Object.keys(usageData.days);
+        for (var i = 0; i < keys.length; i++) {
+            sum += (usageData.days[keys[i]].rx || 0) + (usageData.days[keys[i]].tx || 0);
+        }
+        return { total: sum, dayCount: keys.length };
+    }
+
     // ── Timer to poll network stats ──
     Timer {
         id: pollTimer
@@ -378,6 +389,10 @@ PluginComponent {
                 size: root.iconSize
                 color: root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
                 anchors.verticalCenter: parent.verticalCenter
+
+                Behavior on color {
+                    ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                }
             }
 
             // Combined mode: single total speed
@@ -568,7 +583,7 @@ PluginComponent {
 
                             StyledText {
                                 visible: !root.interfaceFound
-                                text: "No network connection"
+                                text: "No internet connection"
                                 font.pixelSize: Theme.fontSizeSmall
                                 color: Theme.error
                                 horizontalAlignment: Text.AlignHCenter
@@ -731,8 +746,8 @@ PluginComponent {
                                         // Cache max usage for bar proportions (avoids O(n²) in Repeater)
                                         root._maxDailyUsage = root.getMaxDailyUsage();
                                         // 196 base + header(~24) + per-row(36 + spacingXS) * count, clamped
-                                        var historyH = 28 + entries.length * 40;
-                                        root.popoutHeight = Math.min(220 + historyH, 560);
+                                        var historyH = 28 + entries.length * 40 + 44;
+                                        root.popoutHeight = Math.min(220 + historyH, 600);
                                     } else {
                                         root.popoutHeight = 220;
                                     }
@@ -752,7 +767,7 @@ PluginComponent {
                                 NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
                             }
                             Behavior on opacity {
-                                NumberAnimation { duration: 100; easing.type: Easing.OutCubic }
+                                NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
                             }
 
                             Column {
@@ -781,32 +796,36 @@ PluginComponent {
                                         radius: Theme.cornerRadius / 2
                                         color: modelData.date === root.todayKey
                                             ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
-                                            : Theme.surfaceContainerHigh
+                                            : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
 
-                                        // Entrance animations: fade-in + slide-up
+
+                                        // Entrance animations: staggered fade-in + slide-up
                                         opacity: 0
                                         transform: Translate { id: rowTranslate; y: 8 }
 
                                         Component.onCompleted: {
-                                            fadeInAnim.start();
-                                            slideUpAnim.start();
+                                            rowEntranceAnim.start();
                                         }
 
-                                        NumberAnimation {
-                                            id: fadeInAnim
-                                            target: historyRow
-                                            property: "opacity"
-                                            from: 0; to: 1
-                                            duration: 100
-                                            easing.type: Easing.OutCubic
-                                        }
-                                        NumberAnimation {
-                                            id: slideUpAnim
-                                            target: rowTranslate
-                                            property: "y"
-                                            from: 8; to: 0
-                                            duration: 120
-                                            easing.type: Easing.OutCubic
+                                        SequentialAnimation {
+                                            id: rowEntranceAnim
+                                            PauseAnimation { duration: index * 25 }
+                                            ParallelAnimation {
+                                                NumberAnimation {
+                                                    target: historyRow
+                                                    property: "opacity"
+                                                    from: 0; to: 1
+                                                    duration: 120
+                                                    easing.type: Easing.OutCubic
+                                                }
+                                                NumberAnimation {
+                                                    target: rowTranslate
+                                                    property: "y"
+                                                    from: 8; to: 0
+                                                    duration: 120
+                                                    easing.type: Easing.OutCubic
+                                                }
+                                            }
                                         }
 
                                         Row {
@@ -866,6 +885,80 @@ PluginComponent {
                                             }
                                         }
                                     }
+                                }
+
+                                // ── Total row ──
+                                Item {
+                                    id: totalRowWrapper
+                                    width: historyColumnInner.width
+                                    height: totalRow.height + Theme.spacingS
+                                    opacity: 0
+                                    transform: Translate { id: totalRowTranslate; y: 8 }
+
+                                    Component.onCompleted: {
+                                        totalRowEntranceAnim.start();
+                                    }
+
+                                    SequentialAnimation {
+                                        id: totalRowEntranceAnim
+                                        PauseAnimation { duration: root.getHistoryEntries().length * 25 }
+                                        ParallelAnimation {
+                                            NumberAnimation {
+                                                target: totalRowWrapper
+                                                property: "opacity"
+                                                from: 0; to: 1
+                                                duration: 120
+                                                easing.type: Easing.OutCubic
+                                            }
+                                            NumberAnimation {
+                                                target: totalRowTranslate
+                                                property: "y"
+                                                from: 8; to: 0
+                                                duration: 120
+                                                easing.type: Easing.OutCubic
+                                            }
+                                        }
+                                    }
+
+                                StyledRect {
+                                    id: totalRow
+                                    y: Theme.spacingS
+                                    width: parent.width
+                                    height: 36
+                                    radius: Theme.cornerRadius / 2
+                                    color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.08)
+
+                                    Row {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: Theme.spacingS
+                                        anchors.rightMargin: Theme.spacingS
+
+                                        StyledText {
+                                            text: "Total"
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.weight: Font.Bold
+                                            color: Theme.surfaceText
+                                            width: Math.max(50, implicitWidth)
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+
+                                        Item {
+                                            width: parent.width - 50 - Math.max(65, overallLabel.implicitWidth) - Theme.spacingS
+                                            height: 1
+                                        }
+
+                                        StyledText {
+                                            id: overallLabel
+                                            text: root.formatBytes(root.getOverallUsage().total)
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.weight: Font.Bold
+                                            color: Theme.surfaceText
+                                            horizontalAlignment: Text.AlignRight
+                                            width: Math.max(65, implicitWidth)
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+                                }
                                 }
                             }
                         }
