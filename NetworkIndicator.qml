@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Common
@@ -554,18 +555,15 @@ PluginComponent {
                 width: parent.width
                 implicitHeight: root.popoutHeight - Theme.spacingXL
 
-                Flickable {
-                    anchors.fill: parent
+                // ── Sticky top section (does not scroll) ──
+                Column {
+                    id: stickyTop
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
                     anchors.leftMargin: Theme.spacingM
                     anchors.rightMargin: Theme.spacingM
-                    contentHeight: popoutContentCol.implicitHeight
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-
-                    Column {
-                        id: popoutContentCol
-                        width: parent.width
-                        spacing: Theme.spacingM
+                    spacing: Theme.spacingM
 
                         // ── Custom Centered Header ──
                         Column {
@@ -679,239 +677,162 @@ PluginComponent {
                             }
                         }
 
-                        // ── Data Used Wrapper (combines card + history to manage spacing) ──
-                        Column {
-                            width: parent.width
-                            spacing: 0
+                    // ── Data Used Today (clickable to expand history) ──
+                    StyledRect {
+                        id: dataUsedCard
+                        width: parent.width
+                        height: 70
+                        radius: Theme.cornerRadius
+                        color: Qt.rgba(Theme.surfaceContainerHigh.r, Theme.surfaceContainerHigh.g, Theme.surfaceContainerHigh.b, 0.5)
 
-                            // ── Data Used Today (clickable to expand history) ──
-                            StyledRect {
-                                id: dataUsedCard
-                                width: parent.width
-                                height: 70
-                                radius: Theme.cornerRadius
-                                color: Qt.rgba(Theme.surfaceContainerHigh.r, Theme.surfaceContainerHigh.g, Theme.surfaceContainerHigh.b, 0.5)
+                        Row {
+                            anchors.fill: parent
+                            anchors.margins: Theme.spacingM
+                            spacing: Theme.spacingM
 
-                            Row {
-                                anchors.fill: parent
-                                anchors.margins: Theme.spacingM
-                                spacing: Theme.spacingM
+                            DankIcon {
+                                name: "data_usage"
+                                size: 24
+                                color: Theme.surfaceVariantText
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
 
-                                DankIcon {
-                                    name: "data_usage"
-                                    size: 24
+                            Column {
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 2
+                                width: parent.width - 24 - Theme.spacingM - expandIcon.width - Theme.spacingM
+
+                                StyledText {
+                                    text: "Data Used Today"
+                                    font.pixelSize: Theme.fontSizeSmall
                                     color: Theme.surfaceVariantText
-                                    anchors.verticalCenter: parent.verticalCenter
                                 }
-
-                                Column {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    spacing: 2
-                                    width: parent.width - 24 - Theme.spacingM - expandIcon.width - Theme.spacingM
-
-                                    StyledText {
-                                        text: "Data Used Today"
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        color: Theme.surfaceVariantText
-                                    }
-                                    StyledText {
-                                        text: root.formatBytes(root.todayRx + root.todayTx)
-                                        font.pixelSize: Theme.fontSizeLarge
-                                        font.weight: Font.Bold
-                                        color: Theme.surfaceVariantText
-                                    }
-                                }
-
-                                DankIcon {
-                                    id: expandIcon
-                                    name: "expand_more"
-                                    size: 20
+                                StyledText {
+                                    text: root.formatBytes(root.todayRx + root.todayTx)
+                                    font.pixelSize: Theme.fontSizeLarge
+                                    font.weight: Font.Bold
                                     color: Theme.surfaceVariantText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    rotation: root.historyExpanded ? 180 : 0
-
-                                    Behavior on rotation {
-                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-                                    }
                                 }
                             }
 
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.historyExpanded = !root.historyExpanded;
-                                    if (root.historyExpanded) {
-                                        var entries = root.getHistoryEntries();
-                                        // Cache max usage for bar proportions (avoids O(n²) in Repeater)
-                                        root._maxDailyUsage = root.getMaxDailyUsage();
-                                        // 196 base + header(~24) + per-row(36 + spacingXS) * count, clamped
-                                        var historyH = 28 + entries.length * 40 + 44;
-                                        root.popoutHeight = Math.min(220 + historyH, 600);
-                                    } else {
-                                        root.popoutHeight = 220;
-                                    }
+                            DankIcon {
+                                id: expandIcon
+                                name: "expand_more"
+                                size: 20
+                                color: Theme.surfaceVariantText
+                                anchors.verticalCenter: parent.verticalCenter
+                                rotation: root.historyExpanded ? 180 : 0
+
+                                Behavior on rotation {
+                                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
                                 }
                             }
                         }
 
-                        // ── 30-Day History (animated expand/collapse) ──
-                        Item {
-                            id: historyWrapper
-                            width: parent.width
-                            height: root.historyExpanded ? historyColumnInner.implicitHeight + Theme.spacingM : 0
-                            clip: true
-                            opacity: root.historyExpanded ? 1.0 : 0.0
-
-                            Behavior on height {
-                                NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-                            }
-                            Behavior on opacity {
-                                NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-                            }
-
-                            Column {
-                                id: historyColumnInner
-                                width: parent.width
-                                y: Theme.spacingM
-                                spacing: Theme.spacingXS
-
-                                StyledText {
-                                    text: "Last 30 Days"
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    font.weight: Font.Bold
-                                    color: Theme.surfaceVariantText
-                                    bottomPadding: Theme.spacingXS
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.historyExpanded = !root.historyExpanded;
+                                if (root.historyExpanded) {
+                                    var entries = root.getHistoryEntries();
+                                    root._maxDailyUsage = root.getMaxDailyUsage();
+                                    var historyH = 28 + entries.length * 40 + 44;
+                                    root.popoutHeight = Math.min(220 + historyH, 600);
+                                } else {
+                                    root.popoutHeight = 220;
                                 }
+                            }
+                        }
+                    }
+                } // end stickyTop Column
 
-                                Repeater {
-                                    model: root.historyExpanded ? root.getHistoryEntries() : []
+                // ── 30-Day History Section (anchored below sticky top) ──
+                Item {
+                    id: historySection
+                    anchors.top: stickyTop.bottom
+                    anchors.topMargin: root.historyExpanded ? Theme.spacingM : 0
+                    anchors.bottom: parent.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.leftMargin: Theme.spacingM
+                    anchors.rightMargin: 0
+                    visible: root.historyExpanded
+                    opacity: root.historyExpanded ? 1.0 : 0.0
+                    clip: true
 
-                                    StyledRect {
-                                        id: historyRow
-                                        required property var modelData
-                                        required property int index
-                                        width: historyColumnInner.width
-                                        height: 36
-                                        radius: Theme.cornerRadius / 2
-                                        color: modelData.date === root.todayKey
-                                            ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
-                                            : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
+                    Behavior on opacity {
+                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                    }
 
+                    // "Last 30 Days" header (sticky at top)
+                    StyledText {
+                        id: historyLabel
+                        anchors.top: parent.top
+                        width: parent.width - Theme.spacingM
+                        text: "Last 30 Days"
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.weight: Font.Bold
+                        color: Theme.surfaceVariantText
+                        bottomPadding: Theme.spacingXS
+                    }
 
-                                        // Entrance animations: staggered fade-in + slide-up
-                                        opacity: 0
-                                        transform: Translate { id: rowTranslate; y: 8 }
+                    // Scrollable daily entries (with scrollbar)
+                    Flickable {
+                        id: historyFlickable
+                        anchors.top: historyLabel.bottom
+                        anchors.topMargin: Theme.spacingXS
+                        anchors.bottom: totalSection.top
+                        anchors.bottomMargin: Theme.spacingXS
+                        anchors.left: parent.left
+                        anchors.right: historyScrollBar.left
+                        anchors.rightMargin: 2
+                        contentHeight: historyEntriesCol.implicitHeight
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
 
-                                        Component.onCompleted: {
-                                            rowEntranceAnim.start();
-                                        }
+                        ScrollBar.vertical: historyScrollBar
 
-                                        SequentialAnimation {
-                                            id: rowEntranceAnim
-                                            PauseAnimation { duration: index * 25 }
-                                            ParallelAnimation {
-                                                NumberAnimation {
-                                                    target: historyRow
-                                                    property: "opacity"
-                                                    from: 0; to: 1
-                                                    duration: 120
-                                                    easing.type: Easing.OutCubic
-                                                }
-                                                NumberAnimation {
-                                                    target: rowTranslate
-                                                    property: "y"
-                                                    from: 8; to: 0
-                                                    duration: 120
-                                                    easing.type: Easing.OutCubic
-                                                }
-                                            }
-                                        }
+                        Column {
+                            id: historyEntriesCol
+                            width: historyFlickable.width
+                            spacing: Theme.spacingXS
 
-                                        Row {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: Theme.spacingS
-                                            anchors.rightMargin: Theme.spacingS
-                                            spacing: Theme.spacingS
+                            Repeater {
+                                model: root.historyExpanded ? root.getHistoryEntries() : []
 
-                                            // Date label
-                                            StyledText {
-                                                id: dateLabel
-                                                text: modelData.date === root.todayKey ? "Today" : modelData.label
-                                                font.pixelSize: Theme.fontSizeSmall
-                                                font.weight: modelData.date === root.todayKey ? Font.Bold : Font.Normal
-                                                color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
-                                                width: Math.max(50, implicitWidth)
-                                                anchors.verticalCenter: parent.verticalCenter
-                                            }
+                                StyledRect {
+                                    id: historyRow
+                                    required property var modelData
+                                    required property int index
+                                    width: historyEntriesCol.width
+                                    height: 36
+                                    radius: Theme.cornerRadius / 2
+                                    color: modelData.date === root.todayKey
+                                        ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
+                                        : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
 
-                                            // Usage bar
-                                            Item {
-                                                width: Math.max(0, parent.width - dateLabel.width - totalLabel.width - Theme.spacingS * 3)
-                                                height: 8
-                                                clip: true
-                                                anchors.verticalCenter: parent.verticalCenter
-
-                                                StyledRect {
-                                                    width: parent.width
-                                                    height: parent.height
-                                                    radius: 4
-                                                    color: Qt.rgba(Theme.surfaceVariantText.r,
-                                                                   Theme.surfaceVariantText.g,
-                                                                   Theme.surfaceVariantText.b, 0.1)
-                                                }
-
-                                                StyledRect {
-                                                    width: Math.max(2, parent.width * (modelData.total / root._maxDailyUsage))
-                                                    height: parent.height
-                                                    radius: 4
-                                                    color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
-
-                                                    Behavior on width {
-                                                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-                                                    }
-                                                }
-                                            }
-
-                                            // Total data label
-                                            StyledText {
-                                                id: totalLabel
-                                                text: root.formatBytes(modelData.total)
-                                                font.pixelSize: Theme.fontSizeSmall
-                                                color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceText
-                                                horizontalAlignment: Text.AlignRight
-                                                width: Math.max(65, implicitWidth)
-                                                anchors.verticalCenter: parent.verticalCenter
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // ── Total row ──
-                                Item {
-                                    id: totalRowWrapper
-                                    width: historyColumnInner.width
-                                    height: totalRow.height + Theme.spacingS
+                                    // Entrance animations: staggered fade-in + slide-up
                                     opacity: 0
-                                    transform: Translate { id: totalRowTranslate; y: 8 }
+                                    transform: Translate { id: rowTranslate; y: 8 }
 
                                     Component.onCompleted: {
-                                        totalRowEntranceAnim.start();
+                                        rowEntranceAnim.start();
                                     }
 
                                     SequentialAnimation {
-                                        id: totalRowEntranceAnim
-                                        PauseAnimation { duration: root.getHistoryEntries().length * 25 }
+                                        id: rowEntranceAnim
+                                        PauseAnimation { duration: index * 25 }
                                         ParallelAnimation {
                                             NumberAnimation {
-                                                target: totalRowWrapper
+                                                target: historyRow
                                                 property: "opacity"
                                                 from: 0; to: 1
                                                 duration: 120
                                                 easing.type: Easing.OutCubic
                                             }
                                             NumberAnimation {
-                                                target: totalRowTranslate
+                                                target: rowTranslate
                                                 property: "y"
                                                 from: 8; to: 0
                                                 duration: 120
@@ -920,51 +841,167 @@ PluginComponent {
                                         }
                                     }
 
-                                StyledRect {
-                                    id: totalRow
-                                    y: Theme.spacingS
-                                    width: parent.width
-                                    height: 36
-                                    radius: Theme.cornerRadius / 2
-                                    color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.08)
-
                                     Row {
                                         anchors.fill: parent
                                         anchors.leftMargin: Theme.spacingS
                                         anchors.rightMargin: Theme.spacingS
+                                        spacing: Theme.spacingS
 
+                                        // Date label
                                         StyledText {
-                                            text: "Total"
+                                            id: dateLabel
+                                            text: modelData.date === root.todayKey ? "Today" : modelData.label
                                             font.pixelSize: Theme.fontSizeSmall
-                                            font.weight: Font.Bold
-                                            color: Theme.surfaceText
+                                            font.weight: modelData.date === root.todayKey ? Font.Bold : Font.Normal
+                                            color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
                                             width: Math.max(50, implicitWidth)
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
 
+                                        // Usage bar
                                         Item {
-                                            width: parent.width - 50 - Math.max(65, overallLabel.implicitWidth) - Theme.spacingS
-                                            height: 1
+                                            width: Math.max(0, parent.width - dateLabel.width - totalLabel.width - Theme.spacingS * 3)
+                                            height: 8
+                                            clip: true
+                                            anchors.verticalCenter: parent.verticalCenter
+
+                                            StyledRect {
+                                                width: parent.width
+                                                height: parent.height
+                                                radius: 4
+                                                color: Qt.rgba(Theme.surfaceVariantText.r,
+                                                               Theme.surfaceVariantText.g,
+                                                               Theme.surfaceVariantText.b, 0.1)
+                                            }
+
+                                            StyledRect {
+                                                width: Math.max(2, parent.width * (modelData.total / root._maxDailyUsage))
+                                                height: parent.height
+                                                radius: 4
+                                                color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
+
+                                                Behavior on width {
+                                                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                                }
+                                            }
                                         }
 
+                                        // Total data label
                                         StyledText {
-                                            id: overallLabel
-                                            text: root.formatBytes(root.getOverallUsage().total)
+                                            id: totalLabel
+                                            text: root.formatBytes(modelData.total)
                                             font.pixelSize: Theme.fontSizeSmall
-                                            font.weight: Font.Bold
-                                            color: Theme.surfaceText
+                                            color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceText
                                             horizontalAlignment: Text.AlignRight
                                             width: Math.max(65, implicitWidth)
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    ScrollBar {
+                        id: historyScrollBar
+                        anchors.top: historyFlickable.top
+                        anchors.bottom: historyFlickable.bottom
+                        anchors.right: parent.right
+                        anchors.rightMargin: 2
+                        policy: ScrollBar.AsNeeded
+                        implicitWidth: 10
+                        background: Item {}
+                        contentItem: Rectangle {
+                            implicitWidth: 8
+                            radius: 25
+                            color: Qt.rgba(
+                                Theme.surfaceVariantText.r,
+                                Theme.surfaceVariantText.g,
+                                Theme.surfaceVariantText.b,
+                                parent.parent.active ? 0.5 : 0.3
+                            )
+
+                            Behavior on color {
+                                ColorAnimation { duration: 150 }
+                            }
+                        }
+                    }
+
+                    // ── Sticky Total row (pinned at bottom) ──
+                    Item {
+                        id: totalSection
+                        anchors.bottom: parent.bottom
+                        width: parent.width - Theme.spacingM
+                        height: totalRow.height + Theme.spacingS
+                        opacity: 0
+                        transform: Translate { id: totalRowTranslate; y: 8 }
+
+                        Component.onCompleted: {
+                            totalRowEntranceAnim.start();
+                        }
+
+                        SequentialAnimation {
+                            id: totalRowEntranceAnim
+                            PauseAnimation { duration: root.getHistoryEntries().length * 25 }
+                            ParallelAnimation {
+                                NumberAnimation {
+                                    target: totalSection
+                                    property: "opacity"
+                                    from: 0; to: 1
+                                    duration: 120
+                                    easing.type: Easing.OutCubic
+                                }
+                                NumberAnimation {
+                                    target: totalRowTranslate
+                                    property: "y"
+                                    from: 8; to: 0
+                                    duration: 120
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+                        }
+
+                        StyledRect {
+                            id: totalRow
+                            y: Theme.spacingS
+                            width: parent.width
+                            height: 36
+                            radius: Theme.cornerRadius / 2
+                            color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.08)
+
+                            Row {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.spacingS
+                                anchors.rightMargin: Theme.spacingS
+
+                                StyledText {
+                                    text: "Total"
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: Font.Bold
+                                    color: Theme.surfaceText
+                                    width: Math.max(50, implicitWidth)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                Item {
+                                    width: parent.width - 50 - Math.max(65, overallLabel.implicitWidth) - Theme.spacingS
+                                    height: 1
+                                }
+
+                                StyledText {
+                                    id: overallLabel
+                                    text: root.formatBytes(root.getOverallUsage().total)
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: Font.Bold
+                                    color: Theme.surfaceText
+                                    horizontalAlignment: Text.AlignRight
+                                    width: Math.max(65, implicitWidth)
+                                    anchors.verticalCenter: parent.verticalCenter
                                 }
                             }
                         }
                     }
-                    }
-                }
+                } // end historySection
             }
         }
     }
