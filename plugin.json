@@ -2,11 +2,12 @@
     "id": "networkIndicator",
     "name": "Network Indicator",
     "description": "Real-time network speed monitor for DankBar showing upload and download speeds",
-    "version": "1.0.1",
+    "version": "1.2.0",
     "author": "gemb0_0",
     "icon": "speed",
     "type": "widget",
     "component": "./NetworkIndicator.qml",
     "settings": "./NetworkIndicatorSettings.qml",
-    "permissions": ["settings_read", "settings_write", "process"]
+    "permissions": ["settings_read", "settings_write", "process"],
+    "requires_dms": ">=1.4.6"
 }

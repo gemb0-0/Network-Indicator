@@ -28,16 +28,30 @@ PluginComponent {
     property bool interfaceFound: true  // assume online until first poll completes
     property bool _foundThisCycle: false // per-cycle temp flag (never triggers re-render)
     property string _activeIfaceThisCycle: "" // interface name found this cycle
+    property string _activeSsidThisCycle: ""  // ssid found this cycle
 
     // ── Persistent data usage tracking ──
     property var usageData: ({})        // full parsed JSON object
     property real todayRx: 0            // today's accumulated download bytes
     property real todayTx: 0            // today's accumulated upload bytes
+    property var todayNetworks: ({})    // today's usage per network
+    property string currentNetworkName: "" // resolved network name (SSID or iface)
     property string todayKey: ""        // "yyyy-MM-dd" for current day
     property bool dataLoaded: false     // whether initial JSON was loaded
     property bool firstPollAfterLoad: true // first poll needs special delta handling
     property bool historyExpanded: false // whether 30-day history panel is shown
     property real _maxDailyUsage: 1      // cached max for bar proportions (avoid O(n²))
+    property string selectedNetworkFilter: "All" // active filter for history
+    property real _tempDeltaRx: 0       // temp storage for current cycle
+    property real _tempDeltaTx: 0       // temp storage for current cycle
+
+    // ── Offline reason detection (uses DMS NetworkService) ──
+    property bool _dmsNetworkAvailable: typeof DMSNetworkService !== "undefined" && DMSNetworkService.networkAvailable
+    property string offlineReason: {
+        if (root.interfaceFound) return "";
+        if (_dmsNetworkAvailable && !DMSNetworkService.wifiEnabled) return "wifi_off";
+        return "disconnected";
+    }
 
     // ── Formatting helpers ──
     function formatSpeed(bytesPerSec) {
@@ -86,21 +100,34 @@ PluginComponent {
         var lastTx = pluginService.loadPluginState(pluginId, "lastTxBytes", -1);
         var lastIface = pluginService.loadPluginState(pluginId, "lastInterface", "");
 
-        // Deep-copy days to ensure it's a mutable JS object (not a frozen QML proxy)
         var safeDays = {};
         try { safeDays = JSON.parse(JSON.stringify(days || {})); }
         catch (e) { safeDays = days || {}; }
 
-        usageData = { lastRxBytes: lastRx, lastTxBytes: lastTx, lastInterface: lastIface, days: safeDays };
+        // Migrate legacy data
+        var keys = Object.keys(safeDays);
+        for (var i = 0; i < keys.length; i++) {
+            var day = safeDays[keys[i]];
+            if (!day.networks) {
+                day.networks = { "unknown": { rx: day.rx || 0, tx: day.tx || 0 } };
+            }
+        }
+
+        var lastNetwork = pluginService.loadPluginState(pluginId, "lastNetworkName", "");
+
+        usageData = { lastRxBytes: lastRx, lastTxBytes: lastTx, lastInterface: lastIface, lastNetworkName: lastNetwork, days: safeDays };
         console.warn("NetworkIndicator: Loaded " + Object.keys(safeDays).length + " day(s) of history");
 
         todayKey = getCurrentDateKey();
         if (usageData.days[todayKey]) {
             todayRx = usageData.days[todayKey].rx || 0;
             todayTx = usageData.days[todayKey].tx || 0;
+            // deep copy to avoid modifying the read-only proxy in some Qt versions
+            todayNetworks = JSON.parse(JSON.stringify(usageData.days[todayKey].networks || {}));
         } else {
             todayRx = 0;
             todayTx = 0;
+            todayNetworks = {};
         }
 
         dataLoaded = true;
@@ -110,10 +137,11 @@ PluginComponent {
     // ── Persistence: save via DMS Plugin State API (auto-debounced 150ms) ──
     function saveUsageData() {
         if (!dataLoaded) return;  // Don't save until we've loaded existing data
-        usageData.days[todayKey] = { rx: todayRx, tx: todayTx };
+        usageData.days[todayKey] = { rx: todayRx, tx: todayTx, networks: todayNetworks };
         usageData.lastRxBytes = prevRxBytes;
         usageData.lastTxBytes = prevTxBytes;
         usageData.lastInterface = _activeIfaceThisCycle || usageData.lastInterface || "";
+        usageData.lastNetworkName = currentNetworkName || usageData.lastNetworkName || "";
         pruneOldDays();
 
         if (pluginService) {
@@ -121,6 +149,7 @@ PluginComponent {
             pluginService.savePluginState(pluginId, "lastRxBytes", usageData.lastRxBytes);
             pluginService.savePluginState(pluginId, "lastTxBytes", usageData.lastTxBytes);
             pluginService.savePluginState(pluginId, "lastInterface", usageData.lastInterface);
+            pluginService.savePluginState(pluginId, "lastNetworkName", usageData.lastNetworkName);
         }
     }
 
@@ -138,6 +167,23 @@ PluginComponent {
         }
     }
 
+    // ── Get all known networks ──
+    function getAvailableNetworks() {
+        if (!usageData || !usageData.days) return ["All"];
+        var nets = {"All": true};
+        var keys = Object.keys(usageData.days);
+        for (var i = 0; i < keys.length; i++) {
+            var n = usageData.days[keys[i]].networks;
+            if (n) {
+                var nKeys = Object.keys(n);
+                for (var j = 0; j < nKeys.length; j++) {
+                    nets[nKeys[j]] = true;
+                }
+            }
+        }
+        return Object.keys(nets);
+    }
+
     // ── Get sorted history entries (newest first) ──
     function getHistoryEntries() {
         if (!usageData || !usageData.days) return [];
@@ -146,12 +192,23 @@ PluginComponent {
         keys.sort().reverse();
         for (var i = 0; i < keys.length; i++) {
             var day = usageData.days[keys[i]];
+            var r = 0;
+            var t = 0;
+            if (selectedNetworkFilter === "All") {
+                r = day.rx || 0;
+                t = day.tx || 0;
+            } else if (day.networks && day.networks[selectedNetworkFilter]) {
+                r = day.networks[selectedNetworkFilter].rx || 0;
+                t = day.networks[selectedNetworkFilter].tx || 0;
+            }
+            if (r === 0 && t === 0 && selectedNetworkFilter !== "All") continue;
+
             entries.push({
                 date: keys[i],
                 label: formatDateLabel(keys[i]),
-                total: (day.rx || 0) + (day.tx || 0),
-                rx: day.rx || 0,
-                tx: day.tx || 0
+                total: r + t,
+                rx: r,
+                tx: t
             });
         }
         return entries;
@@ -169,13 +226,25 @@ PluginComponent {
 
     // ── Get overall usage across all stored days (up to 30) ──
     function getOverallUsage() {
-        if (!usageData || !usageData.days) return { total: 0, dayCount: 0 };
+        var entries = getHistoryEntries();
         var sum = 0;
-        var keys = Object.keys(usageData.days);
-        for (var i = 0; i < keys.length; i++) {
-            sum += (usageData.days[keys[i]].rx || 0) + (usageData.days[keys[i]].tx || 0);
+        for (var i = 0; i < entries.length; i++) {
+            sum += entries[i].total;
         }
-        return { total: sum, dayCount: keys.length };
+        return { total: sum, dayCount: entries.length };
+    }
+
+    // ── Update Popout Height dynamically ──
+    function updatePopoutHeight() {
+        if (!root.historyExpanded) {
+            root.popoutHeight = root.interfaceFound ? 220 : 250;
+        } else {
+            var entries = root.getHistoryEntries();
+            root._maxDailyUsage = root.getMaxDailyUsage();
+            // Header + Filters + Padding = ~112px, Each entry = 40px
+            var historyH = 112 + entries.length * 40;
+            root.popoutHeight = Math.min(220 + historyH, 600);
+        }
     }
 
     // ── Timer to poll network stats ──
@@ -196,14 +265,19 @@ PluginComponent {
                 if (root.usageData.days[currentKey]) {
                     root.todayRx = root.usageData.days[currentKey].rx || 0;
                     root.todayTx = root.usageData.days[currentKey].tx || 0;
+                    root.todayNetworks = JSON.parse(JSON.stringify(root.usageData.days[currentKey].networks || {}));
                 } else {
                     root.todayRx = 0;
                     root.todayTx = 0;
+                    root.todayNetworks = {};
                 }
             }
 
             root._foundThisCycle = false;
             root._activeIfaceThisCycle = "";
+            root._activeSsidThisCycle = "";
+            root._tempDeltaRx = 0;
+            root._tempDeltaTx = 0;
             netProcess.running = true;
         }
     }
@@ -217,10 +291,27 @@ PluginComponent {
             "for f in /sys/class/net/*/operstate; do " +
             "  iface=$(basename $(dirname $f)); " +
             "  echo \"OPSTATE:${iface}:$(cat $f)\"; " +
+            "  if [ -d /sys/class/net/${iface}/wireless ]; then " +
+            "    ssid=$(iwgetid -r ${iface} 2>/dev/null); " +
+            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
+            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${iface}:yes:\" | cut -d: -f3-); " +
+            "    fi; " +
+            "    echo \"SSID:${iface}:${ssid}\"; " +
+            "  fi; " +
             "done"
         ]
         stdout: SplitParser {
             onRead: line => {
+                if (line.startsWith("SSID:")) {
+                    var sparts = line.split(":");
+                    var sIface = sparts[1];
+                    var sSsid = sparts.slice(2).join(":").trim(); // Handle SSIDs with colons
+                    if (sIface === root._activeIfaceThisCycle) {
+                        root._activeSsidThisCycle = sSsid || "unknown";
+                    }
+                    return;
+                }
+
                 // Handle operstate lines — they come after the /proc/net/dev output
                 if (line.startsWith("OPSTATE:")) {
                     var oparts = line.split(":");
@@ -251,6 +342,7 @@ PluginComponent {
                 // Lock in this interface for the cycle
                 root._foundThisCycle = true;
                 root._activeIfaceThisCycle = ifaceName;
+                root._activeSsidThisCycle = ""; // Reset until SSID line overrides
 
                 var stats = parts[1].trim().split(/\s+/);
                 // columns: rx_bytes rx_packets ... (8 rx fields) tx_bytes tx_packets ...
@@ -270,6 +362,8 @@ PluginComponent {
                         var gapRx = rxBytes - savedRx;
                         var gapTx = txBytes - savedTx;
                         if (gapRx >= 0 && gapTx >= 0) {
+                            root._tempDeltaRx = gapRx;
+                            root._tempDeltaTx = gapTx;
                             root.todayRx += gapRx;
                             root.todayTx += gapTx;
                         }
@@ -277,7 +371,7 @@ PluginComponent {
                     }
                     root.prevRxBytes = rxBytes;
                     root.prevTxBytes = txBytes;
-                    root.saveUsageData();  // Persist gap recovery immediately
+                    // Note: Gap recovery is saved when process exits (so SSID is ready)
                     return;
                 }
 
@@ -292,15 +386,16 @@ PluginComponent {
                     root.uploadSpeed = Math.max(0, deltaTx / elapsed);
 
                     // Accumulate to daily total (only positive deltas)
+                    root._tempDeltaRx = Math.max(0, deltaRx);
+                    root._tempDeltaTx = Math.max(0, deltaTx);
+                    
                     if (deltaRx > 0) root.todayRx += deltaRx;
                     if (deltaTx > 0) root.todayTx += deltaTx;
                 }
 
                 root.prevRxBytes = rxBytes;
                 root.prevTxBytes = txBytes;
-
-                // Save on every poll — the state API debounces writes automatically
-                root.saveUsageData();
+                // Wait for exit to save so we have the SSID
             }
         }
         onExited: {
@@ -312,6 +407,21 @@ PluginComponent {
                 root.uploadSpeed = 0;
                 root.prevRxBytes = -1;
                 root.prevTxBytes = -1;
+            } else {
+                root.currentNetworkName = root._activeSsidThisCycle || root._activeIfaceThisCycle;
+
+                if (root._tempDeltaRx > 0 || root._tempDeltaTx > 0) {
+                    var net = root.todayNetworks[root.currentNetworkName] || { rx: 0, tx: 0 };
+                    net.rx += root._tempDeltaRx;
+                    net.tx += root._tempDeltaTx;
+                    // QML requires re-assigning the object to trigger property bindings for dicts sometimes, 
+                    // or modifying it directly might not persist if not careful.
+                    var newDict = JSON.parse(JSON.stringify(root.todayNetworks));
+                    newDict[root.currentNetworkName] = net;
+                    root.todayNetworks = newDict;
+                }
+
+                root.saveUsageData();
             }
         }
     }
@@ -366,12 +476,12 @@ PluginComponent {
             spacing: Theme.spacingS
             visible: true
 
-            // ── Offline state: wifi_off icon ──
+            // ── Offline state: differentiate wifi_off vs disconnected ──
             DankIcon {
                 visible: !root.interfaceFound
-                name: "wifi_off"
-                size: root.iconSize
-                color: Theme.surfaceVariantText
+                name: "speed"
+                size: root.iconSize + 7
+                color: Theme.error
                 anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -460,12 +570,12 @@ PluginComponent {
             spacing: Theme.spacingXS
             visible: true
 
-            // ── Offline state: wifi_off icon ──
+            // ── Offline state: differentiate wifi_off vs disconnected ──
             DankIcon {
                 visible: !root.interfaceFound
-                name: "wifi_off"
-                size: root.iconSize
-                color: Theme.surfaceVariantText
+                name: "speed"
+                size: root.iconSize + 2
+                color: Theme.error
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
@@ -547,7 +657,9 @@ PluginComponent {
             onVisibleChanged: {
                 if (visible) {
                     root.historyExpanded = false;
-                    root.popoutHeight = 220;
+                    root.popoutHeight = root.interfaceFound ? 220 : 250;
+                } else {
+                    root.selectedNetworkFilter = "All";
                 }
             }
 
@@ -581,7 +693,7 @@ PluginComponent {
 
                             StyledText {
                                 visible: !root.interfaceFound
-                                text: "No internet connection"
+                                text: root.offlineReason === "wifi_off" ? "WiFi is turned off" : "Not connected to any network"
                                 font.pixelSize: Theme.fontSizeSmall
                                 color: Theme.error
                                 horizontalAlignment: Text.AlignHCenter
@@ -589,29 +701,76 @@ PluginComponent {
                             }
                         }
 
-                        // ── Offline banner ──
+                        // ── Offline banner (clickable → opens DMS Network Settings) ──
                         StyledRect {
                             visible: !root.interfaceFound
                             width: parent.width
-                            height: 60
+                            height: offlineBannerCol.implicitHeight + Theme.spacingM * 2
                             radius: Theme.cornerRadius
-                            color: Theme.surfaceContainerHigh
+                            color: offlineBannerMouse.containsMouse
+                                ? Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.12)
+                                : Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.06)
+
+                            Behavior on color {
+                                ColorAnimation { duration: 150; easing.type: Easing.OutCubic }
+                            }
 
                             Row {
-                                anchors.centerIn: parent
+                                anchors.fill: parent
+                                anchors.margins: Theme.spacingM
                                 spacing: Theme.spacingS
 
                                 DankIcon {
-                                    name: "wifi_off"
-                                    size: 24
+                                    name: root.offlineReason === "wifi_off" ? "wifi_off" : "signal_wifi_off"
+                                    size: 28
+                                    color: Theme.error
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                Column {
+                                    id: offlineBannerCol
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: parent.width - 28 - chevronIcon.width - Theme.spacingS * 2
+                                    spacing: 2
+
+                                    StyledText {
+                                        text: root.offlineReason === "wifi_off"
+                                            ? "WiFi is turned off"
+                                            : "No network connection"
+                                        font.pixelSize: Theme.fontSizeMedium
+                                        font.weight: Font.Bold
+                                        color: Theme.surfaceText
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+                                    StyledText {
+                                        text: root.offlineReason === "wifi_off"
+                                            ? "Click to enable WiFi"
+                                            : "Click to browse available networks"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                DankIcon {
+                                    id: chevronIcon
+                                    name: "chevron_right"
+                                    size: 20
                                     color: Theme.surfaceVariantText
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
-                                StyledText {
-                                    text: "Network is offline"
-                                    font.pixelSize: Theme.fontSizeMedium
-                                    color: Theme.surfaceVariantText
-                                    anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                hoverEnabled: true
+                                id: offlineBannerMouse
+                                onClicked: {
+                                    root.closePopout();
+                                    PopoutService.openSettingsWithTab("network");
                                 }
                             }
                         }
@@ -734,14 +893,7 @@ PluginComponent {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 root.historyExpanded = !root.historyExpanded;
-                                if (root.historyExpanded) {
-                                    var entries = root.getHistoryEntries();
-                                    root._maxDailyUsage = root.getMaxDailyUsage();
-                                    var historyH = 28 + entries.length * 40 + 44;
-                                    root.popoutHeight = Math.min(220 + historyH, 600);
-                                } else {
-                                    root.popoutHeight = 220;
-                                }
+                                root.updatePopoutHeight();
                             }
                         }
                     }
@@ -777,16 +929,71 @@ PluginComponent {
                         bottomPadding: Theme.spacingXS
                     }
 
+                    // ── Network Filter Chips ──
+                    Flickable {
+                        id: filtersFlickable
+                        anchors.top: historyLabel.bottom
+                        anchors.topMargin: Theme.spacingS
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        height: 32
+                        contentWidth: filtersRow.implicitWidth
+                        boundsBehavior: Flickable.StopAtBounds
+                        clip: true
+
+                        Row {
+                            id: filtersRow
+                            spacing: Theme.spacingS
+
+                            Repeater {
+                                model: root.historyExpanded ? root.getAvailableNetworks() : []
+
+                                StyledRect {
+                                    id: filterChip
+                                    required property string modelData
+                                    height: 32
+                                    width: filterText.implicitWidth + Theme.spacingM * 2
+                                    radius: 16
+                                    color: root.selectedNetworkFilter === modelData 
+                                        ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
+                                        : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
+                                    border.width: root.selectedNetworkFilter === modelData ? 1 : 0
+                                    border.color: Theme.primary
+
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                                    StyledText {
+                                        id: filterText
+                                        anchors.centerIn: parent
+                                        text: filterChip.modelData
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.weight: root.selectedNetworkFilter === filterChip.modelData ? Font.Bold : Font.Normal
+                                        color: root.selectedNetworkFilter === filterChip.modelData ? Theme.primary : Theme.surfaceVariantText
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.selectedNetworkFilter = filterChip.modelData;
+                                            root.updatePopoutHeight();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Scrollable daily entries (with scrollbar)
                     Flickable {
                         id: historyFlickable
-                        anchors.top: historyLabel.bottom
-                        anchors.topMargin: Theme.spacingXS
+                        anchors.top: filtersFlickable.bottom
+                        anchors.topMargin: Theme.spacingM
                         anchors.bottom: totalSection.top
                         anchors.bottomMargin: Theme.spacingXS
                         anchors.left: parent.left
                         anchors.right: historyScrollBar.left
-                        anchors.rightMargin: 2
+                        anchors.rightMargin: 3
                         contentHeight: historyEntriesCol.implicitHeight
                         clip: true
                         boundsBehavior: Flickable.StopAtBounds
@@ -799,7 +1006,7 @@ PluginComponent {
                             spacing: Theme.spacingXS
 
                             Repeater {
-                                model: root.historyExpanded ? root.getHistoryEntries() : []
+                                model: root.historyExpanded && root.selectedNetworkFilter ? root.getHistoryEntries() : []
 
                                 StyledRect {
                                     id: historyRow
@@ -990,7 +1197,7 @@ PluginComponent {
 
                                 StyledText {
                                     id: overallLabel
-                                    text: root.formatBytes(root.getOverallUsage().total)
+                                    text: root.selectedNetworkFilter ? root.formatBytes(root.getOverallUsage().total) : ""
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.weight: Font.Bold
                                     color: Theme.surfaceText
