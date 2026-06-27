@@ -1,11 +1,12 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
-import Quickshell
 import Quickshell.Io
 import qs.Common
 import qs.Services
 import qs.Widgets
 import qs.Modules.Plugins
+import QtCore
 
 PluginComponent {
     id: root
@@ -44,6 +45,7 @@ PluginComponent {
     property string selectedNetworkFilter: "All" // active filter for history
     property real _tempDeltaRx: 0       // temp storage for current cycle
     property real _tempDeltaTx: 0       // temp storage for current cycle
+    property real unsavedBytes: 0       // bytes accumulated since last disk write
 
     // ── Offline reason detection (uses DMS NetworkService) ──
     property bool _dmsNetworkAvailable: typeof DMSNetworkService !== "undefined" && DMSNetworkService.networkAvailable
@@ -136,7 +138,9 @@ PluginComponent {
 
     // ── Persistence: save via DMS Plugin State API (auto-debounced 150ms) ──
     function saveUsageData() {
-        if (!dataLoaded) return;  // Don't save until we've loaded existing data
+        if (!dataLoaded) return;
+
+        root.unsavedBytes = 0;
         usageData.days[todayKey] = { rx: todayRx, tx: todayTx, networks: todayNetworks };
         usageData.lastRxBytes = prevRxBytes;
         usageData.lastTxBytes = prevTxBytes;
@@ -282,6 +286,19 @@ PluginComponent {
         }
     }
 
+    // ── Timer to periodically save to disk (every 7 mins) ──
+    Timer {
+        id: saveTimer
+        interval: 420000 // 7 minutes
+        running: root.dataLoaded
+        repeat: true
+        onTriggered: {
+            if (root.unsavedBytes > 0) {
+                root.saveUsageData();
+            }
+        }
+    }
+
     // ── Process: reads /proc/net/dev + operstate ──
     Process {
         id: netProcess
@@ -398,7 +415,7 @@ PluginComponent {
                 // Wait for exit to save so we have the SSID
             }
         }
-        onExited: {
+        onExited: exitCode => {
             // Update interfaceFound ONLY after the full read completes (no flicker)
             root.interfaceFound = root._foundThisCycle;
 
@@ -421,20 +438,24 @@ PluginComponent {
                     root.todayNetworks = newDict;
                 }
 
-                root.saveUsageData();
+                root.unsavedBytes += (root._tempDeltaRx + root._tempDeltaTx);
+
+                if (root.unsavedBytes >= 50 * 1024 * 1024) {
+                    root.saveUsageData();
+                }
             }
         }
     }
 
     // ── Delayed init: gives DMS time to inject pluginService ──
-    property int _initAttempts: 0
+property int _initAttempts: 0
     property int _initLogEvery: 20
     Timer {
         id: initTimer
         interval: 500
         repeat: true
         onTriggered: {
-            if (pluginService && !root.dataLoaded) {
+            if (root.pluginService && !root.dataLoaded) {
                 root.loadUsageData();
                 if (root.dataLoaded) {
                     netProcess.running = true;
@@ -443,7 +464,7 @@ PluginComponent {
                 return;
             }
 
-            if (!pluginService) {
+            if (!root.pluginService) {
                 root._initAttempts++;
                 if (root._initAttempts % root._initLogEvery === 0) {
                     console.warn("NetworkIndicator: waiting for pluginService (" + root._initAttempts + " attempts)");
@@ -620,7 +641,7 @@ PluginComponent {
                 }
                 StyledText {
                     text: root.formatSpeed(root.downloadSpeed)
-                    font.pixelSize: Theme.fontSizeXSmall
+                    font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceText
                     anchors.horizontalCenter: parent.horizontalCenter
                 }
@@ -641,7 +662,7 @@ PluginComponent {
                 }
                 StyledText {
                     text: root.formatSpeed(root.uploadSpeed)
-                    font.pixelSize: Theme.fontSizeXSmall
+                    font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceText
                     anchors.horizontalCenter: parent.horizontalCenter
                 }
@@ -954,10 +975,10 @@ PluginComponent {
                                     height: 32
                                     width: filterText.implicitWidth + Theme.spacingM * 2
                                     radius: 16
-                                    color: root.selectedNetworkFilter === modelData 
+                                    color: root.selectedNetworkFilter === filterChip.modelData 
                                         ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
                                         : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
-                                    border.width: root.selectedNetworkFilter === modelData ? 1 : 0
+                                    border.width: root.selectedNetworkFilter === filterChip.modelData ? 1 : 0
                                     border.color: Theme.primary
 
                                     Behavior on color { ColorAnimation { duration: 150 } }
@@ -1015,7 +1036,7 @@ PluginComponent {
                                     width: historyEntriesCol.width
                                     height: 36
                                     radius: Theme.cornerRadius / 2
-                                    color: modelData.date === root.todayKey
+                                    color: historyRow.modelData.date === root.todayKey
                                         ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
                                         : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
 
@@ -1029,7 +1050,7 @@ PluginComponent {
 
                                     SequentialAnimation {
                                         id: rowEntranceAnim
-                                        PauseAnimation { duration: index * 25 }
+                                        PauseAnimation { duration: historyRow.index * 25 }
                                         ParallelAnimation {
                                             NumberAnimation {
                                                 target: historyRow
@@ -1057,10 +1078,10 @@ PluginComponent {
                                         // Date label
                                         StyledText {
                                             id: dateLabel
-                                            text: modelData.date === root.todayKey ? "Today" : modelData.label
+                                            text: historyRow.modelData.date === root.todayKey ? "Today" : historyRow.modelData.label
                                             font.pixelSize: Theme.fontSizeSmall
-                                            font.weight: modelData.date === root.todayKey ? Font.Bold : Font.Normal
-                                            color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
+                                            font.weight: historyRow.modelData.date === root.todayKey ? Font.Bold : Font.Normal
+                                            color: historyRow.modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
                                             width: Math.max(50, implicitWidth)
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
@@ -1082,10 +1103,10 @@ PluginComponent {
                                             }
 
                                             StyledRect {
-                                                width: Math.max(2, parent.width * (modelData.total / root._maxDailyUsage))
+                                                width: Math.max(2, parent.width * (historyRow.modelData.total / root._maxDailyUsage))
                                                 height: parent.height
                                                 radius: 4
-                                                color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
+                                                color: historyRow.modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
 
                                                 Behavior on width {
                                                     NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
@@ -1096,9 +1117,9 @@ PluginComponent {
                                         // Total data label
                                         StyledText {
                                             id: totalLabel
-                                            text: root.formatBytes(modelData.total)
+                                            text: root.formatBytes(historyRow.modelData.total)
                                             font.pixelSize: Theme.fontSizeSmall
-                                            color: modelData.date === root.todayKey ? Theme.primary : Theme.surfaceText
+                                            color: historyRow.modelData.date === root.todayKey ? Theme.primary : Theme.surfaceText
                                             horizontalAlignment: Text.AlignRight
                                             width: Math.max(65, implicitWidth)
                                             anchors.verticalCenter: parent.verticalCenter
@@ -1125,7 +1146,7 @@ PluginComponent {
                                 Theme.surfaceVariantText.r,
                                 Theme.surfaceVariantText.g,
                                 Theme.surfaceVariantText.b,
-                                parent.parent.active ? 0.5 : 0.3
+                                historyScrollBar.active ? 0.5 : 0.3
                             )
 
                             Behavior on color {
@@ -1138,7 +1159,7 @@ PluginComponent {
                     Item {
                         id: totalSection
                         anchors.bottom: parent.bottom
-                        width: parent.width - Theme.spacingM
+                        width: parent.width
                         height: totalRow.height + Theme.spacingS
                         opacity: 0
                         transform: Translate { id: totalRowTranslate; y: 8 }
