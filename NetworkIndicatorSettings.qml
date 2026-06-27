@@ -30,7 +30,7 @@ PluginSettings {
         defaultValue: 2
         minimum: 1
         maximum: 10
-        unit: "sec"
+        unit: "s"
     }
 
     SelectionSetting {
