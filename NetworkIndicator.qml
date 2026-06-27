@@ -238,16 +238,50 @@ PluginComponent {
         return { total: sum, dayCount: entries.length };
     }
 
+    // ── Stable ListModel caches (avoid Repeater model rebuild on poll) ──
+    ListModel { id: networksModel }
+    ListModel { id: historyModel }
+
+    function refreshNetworksModel() {
+        var nets = root.getAvailableNetworks();
+        networksModel.clear();
+        for (var i = 0; i < nets.length; i++) {
+            networksModel.append({ "name": nets[i] });
+        }
+    }
+
+    function refreshHistoryModel() {
+        var entries = root.getHistoryEntries();
+        historyModel.clear();
+        for (var i = 0; i < entries.length; i++) {
+            historyModel.append(entries[i]);
+        }
+    }
+
     // ── Update Popout Height dynamically ──
     function updatePopoutHeight() {
         if (!root.historyExpanded) {
             root.popoutHeight = root.interfaceFound ? 220 : 250;
         } else {
-            var entries = root.getHistoryEntries();
             root._maxDailyUsage = root.getMaxDailyUsage();
-            // Header + Filters + Padding = ~112px, Each entry = 40px
-            var historyH = 112 + entries.length * 40;
-            root.popoutHeight = Math.min(220 + historyH, 600);
+            
+            // We use fixed component heights here to avoid a QML layout race condition.
+            // If we read 'historyLabel.height' in the same frame that the popout expands,
+            // it evaluates to 0, causing the ListView's height to become negative and disappear.
+            // nonListH = historyLabel(18) + spacingS(8) + filters(32) + spacingM(12) + spacingXS(4) + totalSection(44)
+            var nonListH = 118;
+                           
+            var entriesCount = historyModel.count;
+            var listContentH = entriesCount > 0 ? (entriesCount * 36 + (entriesCount - 1) * Theme.spacingXS) : 0;
+            
+            // The extra 8px of padding is added here via `+ Theme.spacingS`
+            // (Theme.spacingS evaluates to exactly 8px in DankMaterialShell)
+            var historyH = nonListH + listContentH + Theme.spacingS;
+            
+            // 232 is collapsedHeight (220) + historySection.topMargin (12).
+            // Without the 12px offset, historySection is 12px shorter than historyH, 
+            // causing the DankListView to clip its bottom entry and show a scrollbar!
+            root.popoutHeight = Math.min(232 + historyH, 600);
         }
     }
 
@@ -289,7 +323,7 @@ PluginComponent {
     // ── Timer to periodically save to disk (every 7 mins) ──
     Timer {
         id: saveTimer
-        interval: 420000 // 7 minutes
+        interval: 420000
         running: root.dataLoaded
         repeat: true
         onTriggered: {
@@ -436,6 +470,25 @@ PluginComponent {
                     var newDict = JSON.parse(JSON.stringify(root.todayNetworks));
                     newDict[root.currentNetworkName] = net;
                     root.todayNetworks = newDict;
+
+                    // Update the model dynamically without rebuilding if expanded
+                    if (root.historyExpanded && historyModel.count > 0) {
+                        var topEntry = historyModel.get(0);
+                        if (topEntry.date === root.todayKey) {
+                            var r = 0;
+                            var t = 0;
+                            if (root.selectedNetworkFilter === "All") {
+                                r = root.todayRx;
+                                t = root.todayTx;
+                            } else if (root.todayNetworks[root.selectedNetworkFilter]) {
+                                r = root.todayNetworks[root.selectedNetworkFilter].rx || 0;
+                                t = root.todayNetworks[root.selectedNetworkFilter].tx || 0;
+                            }
+                            historyModel.setProperty(0, "rx", r);
+                            historyModel.setProperty(0, "tx", t);
+                            historyModel.setProperty(0, "total", r + t);
+                        }
+                    }
                 }
 
                 root.unsavedBytes += (root._tempDeltaRx + root._tempDeltaTx);
@@ -501,30 +554,10 @@ property int _initAttempts: 0
             DankIcon {
                 visible: !root.interfaceFound
                 name: "speed"
-                size: root.iconSize + 7
+                size: root.iconSize + 3
+                weight: 700
                 color: Theme.error
                 anchors.verticalCenter: parent.verticalCenter
-            }
-
-            // ── Online state ──
-            DankIcon {
-                visible: root.interfaceFound && root.displayMode !== "combined"
-                name: "speed"
-                size: root.iconSize
-                color: Theme.surfaceVariantText
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            DankIcon {
-                visible: root.interfaceFound && root.displayMode === "combined"
-                name: "import_export"
-                size: root.iconSize
-                color: root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
-                anchors.verticalCenter: parent.verticalCenter
-
-                Behavior on color {
-                    ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
-                }
             }
 
             // Combined mode: single total speed
@@ -532,6 +565,17 @@ property int _initAttempts: 0
                 visible: root.interfaceFound && root.displayMode === "combined"
                 spacing: 2
                 anchors.verticalCenter: parent.verticalCenter
+
+                DankIcon {
+                    name: "import_export"
+                    size: root.iconSize
+                    color: root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
+                    anchors.verticalCenter: parent.verticalCenter
+                    weight: 700
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
+                }
 
                 StyledText {
                     text: root.formatSpeed(root.totalSpeed)
@@ -547,12 +591,16 @@ property int _initAttempts: 0
                 spacing: 2
                 anchors.verticalCenter: parent.verticalCenter
 
-                StyledText {
-                    text: "↓"
-                    font.pixelSize: Theme.fontSizeMedium
-                    font.weight: Font.Bold
-                    color: Theme.primary
+                DankIcon {
+                    name: "arrow_downward"
+                    size: root.iconSize
+                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
                     anchors.verticalCenter: parent.verticalCenter
+                    weight: 700
+                    
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
                 }
                 StyledText {
                     text: root.formatSpeed(root.downloadSpeed)
@@ -568,12 +616,16 @@ property int _initAttempts: 0
                 spacing: 2
                 anchors.verticalCenter: parent.verticalCenter
 
-                StyledText {
-                    text: "↑"
-                    font.pixelSize: Theme.fontSizeMedium
-                    font.weight: Font.Bold
-                    color: Theme.error
+                DankIcon {
+                    name: "arrow_upward"
+                    size: root.iconSize
+                    color: root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText
                     anchors.verticalCenter: parent.verticalCenter
+                    weight: 700
+                    
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
                 }
                 StyledText {
                     text: root.formatSpeed(root.uploadSpeed)
@@ -588,7 +640,7 @@ property int _initAttempts: 0
     // ── Vertical Bar Pill (for vertical DankBar) ──
     verticalBarPill: Component {
         Column {
-            spacing: Theme.spacingXS
+            spacing: Theme.spacingS
             visible: true
 
             // ── Offline state: differentiate wifi_off vs disconnected ──
@@ -598,32 +650,35 @@ property int _initAttempts: 0
                 size: root.iconSize + 2
                 color: Theme.error
                 anchors.horizontalCenter: parent.horizontalCenter
-            }
+                weight: 700
+                filled: true
 
-            // ── Online state ──
-            DankIcon {
-                visible: root.interfaceFound && root.displayMode !== "combined"
-                name: "speed"
-                size: root.iconSize
-                color: Theme.surfaceVariantText
-                anchors.horizontalCenter: parent.horizontalCenter
-            }
-
-            DankIcon {
-                visible: root.interfaceFound && root.displayMode === "combined"
-                name: "import_export"
-                size: root.iconSize
-                color: root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
-                anchors.horizontalCenter: parent.horizontalCenter
             }
 
             // Combined mode: single total speed
-            StyledText {
+            Column {
                 visible: root.interfaceFound && root.displayMode === "combined"
-                text: root.formatSpeed(root.totalSpeed)
-                font.pixelSize: Theme.fontSizeMedium
-                color: Theme.surfaceText
+                spacing: 1
                 anchors.horizontalCenter: parent.horizontalCenter
+
+                DankIcon {
+                    name: "import_export"
+                    size: root.iconSize
+                    color: root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    weight: 700
+
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
+                }
+
+                StyledText {
+                    text: root.formatSpeed(root.totalSpeed)
+                    font.pixelSize: Theme.fontSizeMedium
+                    color: Theme.surfaceText
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
             }
 
             // Separate mode: download ↓
@@ -632,12 +687,16 @@ property int _initAttempts: 0
                 spacing: 1
                 anchors.horizontalCenter: parent.horizontalCenter
 
-                StyledText {
-                    text: "↓"
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.Bold
-                    color: Theme.primary
+                DankIcon {
+                    name: "arrow_downward"
+                    size: root.iconSize
+                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
                     anchors.horizontalCenter: parent.horizontalCenter
+                    weight: 700
+                    
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
                 }
                 StyledText {
                     text: root.formatSpeed(root.downloadSpeed)
@@ -653,12 +712,16 @@ property int _initAttempts: 0
                 spacing: 1
                 anchors.horizontalCenter: parent.horizontalCenter
 
-                StyledText {
-                    text: "↑"
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.Bold
-                    color: Theme.error
+                DankIcon {
+                    name: "arrow_upward"
+                    size: root.iconSize
+                    color: root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText
                     anchors.horizontalCenter: parent.horizontalCenter
+                    weight: 700
+                    
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
                 }
                 StyledText {
                     text: root.formatSpeed(root.uploadSpeed)
@@ -914,6 +977,13 @@ property int _initAttempts: 0
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 root.historyExpanded = !root.historyExpanded;
+                                root.selectedNetworkFilter = "All";
+                                if (root.historyExpanded) {
+                                    root.refreshNetworksModel();
+                                    root.refreshHistoryModel();
+                                    filtersFlickable.contentX = 0;
+                                    historyListView.positionViewAtBeginning();
+                                }
                                 root.updatePopoutHeight();
                             }
                         }
@@ -967,18 +1037,18 @@ property int _initAttempts: 0
                             spacing: Theme.spacingS
 
                             Repeater {
-                                model: root.historyExpanded ? root.getAvailableNetworks() : []
+                                model: networksModel
 
                                 StyledRect {
                                     id: filterChip
-                                    required property string modelData
+                                    required property string name
                                     height: 32
                                     width: filterText.implicitWidth + Theme.spacingM * 2
                                     radius: 16
-                                    color: root.selectedNetworkFilter === filterChip.modelData 
+                                    color: root.selectedNetworkFilter === filterChip.name 
                                         ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
                                         : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
-                                    border.width: root.selectedNetworkFilter === filterChip.modelData ? 1 : 0
+                                    border.width: root.selectedNetworkFilter === filterChip.name ? 1 : 0
                                     border.color: Theme.primary
 
                                     Behavior on color { ColorAnimation { duration: 150 } }
@@ -986,17 +1056,18 @@ property int _initAttempts: 0
                                     StyledText {
                                         id: filterText
                                         anchors.centerIn: parent
-                                        text: filterChip.modelData
+                                        text: filterChip.name
                                         font.pixelSize: Theme.fontSizeSmall
-                                        font.weight: root.selectedNetworkFilter === filterChip.modelData ? Font.Bold : Font.Normal
-                                        color: root.selectedNetworkFilter === filterChip.modelData ? Theme.primary : Theme.surfaceVariantText
+                                        font.weight: root.selectedNetworkFilter === filterChip.name ? Font.Bold : Font.Normal
+                                        color: root.selectedNetworkFilter === filterChip.name ? Theme.primary : Theme.surfaceVariantText
                                     }
 
                                     MouseArea {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: {
-                                            root.selectedNetworkFilter = filterChip.modelData;
+                                            root.selectedNetworkFilter = filterChip.name;
+                                            root.refreshHistoryModel();
                                             root.updatePopoutHeight();
                                         }
                                     }
@@ -1005,152 +1076,111 @@ property int _initAttempts: 0
                         }
                     }
 
-                    // Scrollable daily entries (with scrollbar)
-                    Flickable {
-                        id: historyFlickable
+                    // Scrollable daily entries (using DankListView for smooth scrolling)
+                    DankListView {
+                        id: historyListView
                         anchors.top: filtersFlickable.bottom
                         anchors.topMargin: Theme.spacingM
                         anchors.bottom: totalSection.top
                         anchors.bottomMargin: Theme.spacingXS
                         anchors.left: parent.left
-                        anchors.right: historyScrollBar.left
-                        anchors.rightMargin: 3
-                        contentHeight: historyEntriesCol.implicitHeight
+                        anchors.right: parent.right
+                        anchors.rightMargin: 2
                         clip: true
-                        boundsBehavior: Flickable.StopAtBounds
+                        spacing: Theme.spacingXS
+                        
+                        model: historyModel
+                        
+                        ScrollBar.vertical: ScrollBar {
+                            id: historyScrollBar
+                            policy: ScrollBar.AsNeeded
+                            implicitWidth: 10
+                            background: Item {}
+                            contentItem: Rectangle {
+                                implicitWidth: 8
+                                radius: 25
+                                color: Qt.rgba(
+                                    Theme.surfaceVariantText.r,
+                                    Theme.surfaceVariantText.g,
+                                    Theme.surfaceVariantText.b,
+                                    historyScrollBar.active ? 0.5 : 0.3
+                                )
 
-                        ScrollBar.vertical: historyScrollBar
+                                Behavior on color { ColorAnimation { duration: 150 } }
+                            }
+                        }
 
-                        Column {
-                            id: historyEntriesCol
-                            width: historyFlickable.width
-                            spacing: Theme.spacingXS
+                        delegate: StyledRect {
+                            id: historyRow
+                            required property string date
+                            required property string label
+                            required property real total
+                            required property real rx
+                            required property real tx
+                            required property int index
+                            
+                            width: historyListView.width - 13
+                            height: 36
+                            radius: Theme.cornerRadius / 2
+                            color: historyRow.date === root.todayKey
+                                ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
+                                : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
 
-                            Repeater {
-                                model: root.historyExpanded && root.selectedNetworkFilter ? root.getHistoryEntries() : []
+                            Row {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.spacingS
+                                anchors.rightMargin: Theme.spacingS
+                                spacing: Theme.spacingS
 
-                                StyledRect {
-                                    id: historyRow
-                                    required property var modelData
-                                    required property int index
-                                    width: historyEntriesCol.width
-                                    height: 36
-                                    radius: Theme.cornerRadius / 2
-                                    color: historyRow.modelData.date === root.todayKey
-                                        ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
-                                        : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
+                                // Date label
+                                StyledText {
+                                    id: dateLabel
+                                    text: historyRow.date === root.todayKey ? "Today" : historyRow.label
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: historyRow.date === root.todayKey ? Font.Bold : Font.Normal
+                                    color: historyRow.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
+                                    width: Math.max(50, implicitWidth)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
 
-                                    // Entrance animations: staggered fade-in + slide-up
-                                    opacity: 0
-                                    transform: Translate { id: rowTranslate; y: 8 }
+                                // Usage bar
+                                Item {
+                                    width: Math.max(0, parent.width - dateLabel.width - totalLabel.width - Theme.spacingS * 3)
+                                    height: 8
+                                    clip: true
+                                    anchors.verticalCenter: parent.verticalCenter
 
-                                    Component.onCompleted: {
-                                        rowEntranceAnim.start();
+                                    StyledRect {
+                                        width: parent.width
+                                        height: parent.height
+                                        radius: 4
+                                        color: Qt.rgba(Theme.surfaceVariantText.r,
+                                                       Theme.surfaceVariantText.g,
+                                                       Theme.surfaceVariantText.b, 0.1)
                                     }
 
-                                    SequentialAnimation {
-                                        id: rowEntranceAnim
-                                        PauseAnimation { duration: historyRow.index * 25 }
-                                        ParallelAnimation {
-                                            NumberAnimation {
-                                                target: historyRow
-                                                property: "opacity"
-                                                from: 0; to: 1
-                                                duration: 120
-                                                easing.type: Easing.OutCubic
-                                            }
-                                            NumberAnimation {
-                                                target: rowTranslate
-                                                property: "y"
-                                                from: 8; to: 0
-                                                duration: 120
-                                                easing.type: Easing.OutCubic
-                                            }
-                                        }
-                                    }
+                                    StyledRect {
+                                        width: Math.max(2, parent.width * (historyRow.total / root._maxDailyUsage))
+                                        height: parent.height
+                                        radius: 4
+                                        color: historyRow.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
 
-                                    Row {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: Theme.spacingS
-                                        anchors.rightMargin: Theme.spacingS
-                                        spacing: Theme.spacingS
-
-                                        // Date label
-                                        StyledText {
-                                            id: dateLabel
-                                            text: historyRow.modelData.date === root.todayKey ? "Today" : historyRow.modelData.label
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            font.weight: historyRow.modelData.date === root.todayKey ? Font.Bold : Font.Normal
-                                            color: historyRow.modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
-                                            width: Math.max(50, implicitWidth)
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
-
-                                        // Usage bar
-                                        Item {
-                                            width: Math.max(0, parent.width - dateLabel.width - totalLabel.width - Theme.spacingS * 3)
-                                            height: 8
-                                            clip: true
-                                            anchors.verticalCenter: parent.verticalCenter
-
-                                            StyledRect {
-                                                width: parent.width
-                                                height: parent.height
-                                                radius: 4
-                                                color: Qt.rgba(Theme.surfaceVariantText.r,
-                                                               Theme.surfaceVariantText.g,
-                                                               Theme.surfaceVariantText.b, 0.1)
-                                            }
-
-                                            StyledRect {
-                                                width: Math.max(2, parent.width * (historyRow.modelData.total / root._maxDailyUsage))
-                                                height: parent.height
-                                                radius: 4
-                                                color: historyRow.modelData.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
-
-                                                Behavior on width {
-                                                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-                                                }
-                                            }
-                                        }
-
-                                        // Total data label
-                                        StyledText {
-                                            id: totalLabel
-                                            text: root.formatBytes(historyRow.modelData.total)
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: historyRow.modelData.date === root.todayKey ? Theme.primary : Theme.surfaceText
-                                            horizontalAlignment: Text.AlignRight
-                                            width: Math.max(65, implicitWidth)
-                                            anchors.verticalCenter: parent.verticalCenter
+                                        Behavior on width {
+                                            NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }
 
-                    ScrollBar {
-                        id: historyScrollBar
-                        anchors.top: historyFlickable.top
-                        anchors.bottom: historyFlickable.bottom
-                        anchors.right: parent.right
-                        anchors.rightMargin: 2
-                        policy: ScrollBar.AsNeeded
-                        implicitWidth: 10
-                        background: Item {}
-                        contentItem: Rectangle {
-                            implicitWidth: 8
-                            radius: 25
-                            color: Qt.rgba(
-                                Theme.surfaceVariantText.r,
-                                Theme.surfaceVariantText.g,
-                                Theme.surfaceVariantText.b,
-                                historyScrollBar.active ? 0.5 : 0.3
-                            )
-
-                            Behavior on color {
-                                ColorAnimation { duration: 150 }
+                                // Total data label
+                                StyledText {
+                                    id: totalLabel
+                                    text: root.formatBytes(historyRow.total)
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: historyRow.date === root.todayKey ? Theme.primary : Theme.surfaceText
+                                    horizontalAlignment: Text.AlignRight
+                                    width: Math.max(65, implicitWidth)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
                             }
                         }
                     }
