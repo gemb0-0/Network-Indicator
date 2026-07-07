@@ -25,6 +25,7 @@ PluginComponent {
     property real totalSpeed: downloadSpeed + uploadSpeed
     property real prevRxBytes: -1   // -1 = uninitialized sentinel
     property real prevTxBytes: -1
+    property string prevIface: ""   // tracks interface change between cycles
     property bool interfaceFound: true  // assume online until first poll completes
     property bool _foundThisCycle: false // per-cycle temp flag (never triggers re-render)
     property string _activeIfaceThisCycle: "" // interface name found this cycle
@@ -336,18 +337,27 @@ PluginComponent {
         id: netProcess
         command: [
             "sh", "-c",
-            "cat /proc/net/dev; " +
+            "active_iface=\"\"; " +
             "for f in /sys/class/net/*/operstate; do " +
             "  iface=$(basename $(dirname $f)); " +
-            "  echo \"OPSTATE:${iface}:$(cat $f)\"; " +
-            "  if [ -d /sys/class/net/${iface}/wireless ]; then " +
-            "    ssid=$(iwgetid -r ${iface} 2>/dev/null); " +
-            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
-            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${iface}:yes:\" | cut -d: -f3-); " +
-            "    fi; " +
-            "    echo \"SSID:${iface}:${ssid}\"; " +
+            "  case \"$iface\" in lo|docker*|br-*|veth*|virbr*) continue ;; esac; " +
+            "  state=$(cat $f 2>/dev/null); " +
+            "  if [ \"$state\" = \"up\" ] || [ \"$state\" = \"unknown\" ]; then " +
+            "    active_iface=\"$iface\"; " +
+            "    break; " +
             "  fi; " +
-            "done"
+            "done; " +
+            "if [ -n \"$active_iface\" ]; then " +
+            "  grep \"^[ ]*$active_iface:\" /proc/net/dev; " +
+            "  echo \"OPSTATE:${active_iface}:up\"; " +
+            "  if [ -d \"/sys/class/net/${active_iface}/wireless\" ]; then " +
+            "    ssid=$(iwgetid -r ${active_iface} 2>/dev/null); " +
+            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
+            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${active_iface}:yes:\" | cut -d: -f3-); " +
+            "    fi; " +
+            "    echo \"SSID:${active_iface}:${ssid}\"; " +
+            "  fi; " +
+            "fi"
         ]
         stdout: SplitParser {
             onRead: line => {
@@ -420,12 +430,13 @@ PluginComponent {
                     }
                     root.prevRxBytes = rxBytes;
                     root.prevTxBytes = txBytes;
+                    root.prevIface = ifaceName;
                     // Note: Gap recovery is saved when process exits (so SSID is ready)
                     return;
                 }
 
                 // ── Normal delta accumulation ──
-                if (root.prevRxBytes >= 0 && root.prevTxBytes >= 0) {
+                if (root.prevRxBytes >= 0 && root.prevTxBytes >= 0 && root.prevIface === ifaceName) {
                     var deltaRx = rxBytes - root.prevRxBytes;
                     var deltaTx = txBytes - root.prevTxBytes;
                     var elapsed = root.updateInterval;
@@ -440,10 +451,15 @@ PluginComponent {
                     
                     if (deltaRx > 0) root.todayRx += deltaRx;
                     if (deltaTx > 0) root.todayTx += deltaTx;
+                } else if (root.prevIface !== ifaceName) {
+                    // Interface changed, reset speeds to avoid massive spike
+                    root.downloadSpeed = 0;
+                    root.uploadSpeed = 0;
                 }
 
                 root.prevRxBytes = rxBytes;
                 root.prevTxBytes = txBytes;
+                root.prevIface = ifaceName;
                 // Wait for exit to save so we have the SSID
             }
         }
