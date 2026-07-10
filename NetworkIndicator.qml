@@ -19,6 +19,23 @@ PluginComponent {
     // "separate" = show ↑ and ↓ individually, "combined" = single total speed
     property string displayMode: pluginData.displayMode || "separate"
 
+    //DMS vertical bar shifts the widget by half of the widget height so we kinda negate that by adjusting triggerY before toggle manually.
+    pillClickAction: function () {
+        let popout = null;
+        for (let i = 0; i < root.data.length; i++) {
+            if (root.data[i] && typeof root.data[i].toggle === "function" && root.data[i].triggerY !== undefined) {
+                popout = root.data[i];
+                break;
+            }
+        }
+        if (popout) {
+            if (root.isVertical) {
+                popout.triggerY += root.height / 2;
+            }
+            popout.toggle();
+        }
+    }
+
     // ── Internal state ──
     property real downloadSpeed: 0
     property real uploadSpeed: 0
@@ -57,18 +74,29 @@ PluginComponent {
 
     // ── Formatting helpers ──
     function formatSpeed(bytesPerSec) {
-        if (displayUnit === "kbps") {
-            return (bytesPerSec / 1024).toFixed(1) + " KB/s";
-        } else if (displayUnit === "mbps") {
-            return (bytesPerSec / (1024 * 1024)).toFixed(2) + " MB/s";
+        
+        function formatNum(val, isBytes) {
+            if (val === 0) return "0";
+            if (isBytes) return val.toFixed(0);
+            
+            if (val < 10) return val.toFixed(2);
+            if (val < 100) return val.toFixed(1);
+            return val.toFixed(0);
         }
+
+        if (displayUnit === "kbps") {
+            return formatNum(bytesPerSec / 1024, false) + " KB/s";
+        } else if (displayUnit === "mbps") {
+            return formatNum(bytesPerSec / (1024 * 1024), false) + " MB/s";
+        }
+        
         // auto
         if (bytesPerSec < 1024) {
-            return bytesPerSec.toFixed(0) + " B/s";
+            return formatNum(bytesPerSec, true) + " B/s";
         } else if (bytesPerSec < 1024 * 1024) {
-            return (bytesPerSec / 1024).toFixed(1) + " KB/s";
+            return formatNum(bytesPerSec / 1024, false) + " KB/s";
         } else {
-            return (bytesPerSec / (1024 * 1024)).toFixed(2) + " MB/s";
+            return formatNum(bytesPerSec / (1024 * 1024), false) + " MB/s";
         }
     }
 
@@ -601,32 +629,7 @@ PluginComponent {
 
                 StyledText {
                     text: root.formatSpeed(root.totalSpeed)
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.surfaceText
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-            }
-
-            // Separate mode: download ↓
-            Row {
-                visible: root.interfaceFound && root.displayMode === "separate"
-                spacing: 2
-                anchors.verticalCenter: parent.verticalCenter
-
-                DankIcon {
-                    name: "arrow_downward"
-                    size: root.iconSize
-                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
-                    anchors.verticalCenter: parent.verticalCenter
-                    weight: 700
-                    
-                    Behavior on color {
-                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
-                    }
-                }
-                StyledText {
-                    text: root.formatSpeed(root.downloadSpeed)
-                    font.pixelSize: Theme.fontSizeSmall
+                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
                     color: Theme.surfaceText
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -651,7 +654,32 @@ PluginComponent {
                 }
                 StyledText {
                     text: root.formatSpeed(root.uploadSpeed)
-                    font.pixelSize: Theme.fontSizeSmall
+                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    color: Theme.surfaceText
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+
+            // Separate mode: download ↓
+            Row {
+                visible: root.interfaceFound && root.displayMode === "separate"
+                spacing: 2
+                anchors.verticalCenter: parent.verticalCenter
+
+                DankIcon {
+                    name: "arrow_downward"
+                    size: root.iconSize
+                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
+                    anchors.verticalCenter: parent.verticalCenter
+                    weight: 700
+                    
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
+                }
+                StyledText {
+                    text: root.formatSpeed(root.downloadSpeed)
+                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
                     color: Theme.surfaceText
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -669,18 +697,16 @@ PluginComponent {
             DankIcon {
                 visible: !root.interfaceFound
                 name: "speed"
-                size: root.iconSize + 2
+                size: root.iconSize + 3
                 color: Theme.error
                 anchors.horizontalCenter: parent.horizontalCenter
                 weight: 700
-                filled: true
-
             }
 
             // Combined mode: single total speed
             Column {
                 visible: root.interfaceFound && root.displayMode === "combined"
-                spacing: 1
+                spacing: 2
                 anchors.horizontalCenter: parent.horizontalCenter
 
                 DankIcon {
@@ -696,42 +722,17 @@ PluginComponent {
                 }
 
                 StyledText {
-                    text: root.formatSpeed(root.totalSpeed)
-                    font.pixelSize: Theme.fontSizeMedium
+                    text: root.formatSpeed(root.totalSpeed).replace(" ", "\n")
+                    horizontalAlignment: Text.AlignHCenter
+                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
                     color: Theme.surfaceText
-                    anchors.horizontalCenter: parent.horizontalCenter
-                }
-            }
-
-            // Separate mode: download ↓
-            Column {
-                visible: root.interfaceFound && root.displayMode === "separate"
-                spacing: 1
-                anchors.horizontalCenter: parent.horizontalCenter
-
-                DankIcon {
-                    name: "arrow_downward"
-                    size: root.iconSize
-                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    weight: 700
-                    
-                    Behavior on color {
-                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
-                    }
-                }
-                StyledText {
-                    text: root.formatSpeed(root.downloadSpeed)
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.surfaceText
-                    anchors.horizontalCenter: parent.horizontalCenter
                 }
             }
 
             // Separate mode: upload ↑
             Column {
                 visible: root.interfaceFound && root.displayMode === "separate"
-                spacing: 1
+                spacing: 2
                 anchors.horizontalCenter: parent.horizontalCenter
 
                 DankIcon {
@@ -746,10 +747,35 @@ PluginComponent {
                     }
                 }
                 StyledText {
-                    text: root.formatSpeed(root.uploadSpeed)
-                    font.pixelSize: Theme.fontSizeSmall
+                    text: root.formatSpeed(root.uploadSpeed).replace(" ", "\n")
+                    horizontalAlignment: Text.AlignHCenter
+                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
                     color: Theme.surfaceText
+                }
+            }
+
+            // Separate mode: download ↓
+            Column {
+                visible: root.interfaceFound && root.displayMode === "separate"
+                spacing: 2
+                anchors.horizontalCenter: parent.horizontalCenter
+
+                DankIcon {
+                    name: "arrow_downward"
+                    size: root.iconSize
+                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
                     anchors.horizontalCenter: parent.horizontalCenter
+                    weight: 700
+                    
+                    Behavior on color {
+                        ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
+                }
+                StyledText {
+                    text: root.formatSpeed(root.downloadSpeed).replace(" ", "\n")
+                    horizontalAlignment: Text.AlignHCenter
+                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    color: Theme.surfaceText
                 }
             }
         }
