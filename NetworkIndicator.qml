@@ -337,25 +337,42 @@ PluginComponent {
         id: netProcess
         command: [
             "sh", "-c",
-            "active_iface=\"\"; " +
-            "for f in /sys/class/net/*/operstate; do " +
-            "  iface=$(basename $(dirname $f)); " +
-            "  case \"$iface\" in lo|docker*|br-*|veth*|virbr*) continue ;; esac; " +
-            "  state=$(cat $f 2>/dev/null); " +
-            "  if [ \"$state\" = \"up\" ] || [ \"$state\" = \"unknown\" ]; then " +
-            "    active_iface=\"$iface\"; " +
-            "    break; " +
-            "  fi; " +
-            "done; " +
-            "if [ -n \"$active_iface\" ]; then " +
-            "  grep \"^[ ]*$active_iface:\" /proc/net/dev; " +
-            "  echo \"OPSTATE:${active_iface}:up\"; " +
-            "  if [ -d \"/sys/class/net/${active_iface}/wireless\" ]; then " +
-            "    ssid=$(iwgetid -r ${active_iface} 2>/dev/null); " +
-            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
-            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${active_iface}:yes:\" | cut -d: -f3-); " +
+            "active_iface=\"\"; fallback_iface=\"\"; " +
+            "if command -v ip >/dev/null 2>&1; then " +
+            "  active_iface=$(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}' | head -n 1); " +
+            "fi; " +
+            "if [ -z \"$active_iface\" ]; then " +
+            "  for f in /sys/class/net/*/operstate; do " +
+            "    [ -e \"$f\" ] || continue; " +
+            "    iface=$(basename \"$(dirname \"$f\")\"); " +
+            "    case \"$iface\" in lo|docker*|br-*|veth*|virbr*|tailscale*|waydroid*|vboxnet*|tun*|tap*) continue ;; esac; " +
+            "    state=$(cat \"$f\" 2>/dev/null); " +
+            "    carrier=$(cat \"/sys/class/net/$iface/carrier\" 2>/dev/null); " +
+            "    if [ \"$state\" = \"up\" ] && [ \"$carrier\" = \"1\" ]; then " +
+            "      active_iface=\"$iface\"; " +
+            "      break; " +
             "    fi; " +
-            "    echo \"SSID:${active_iface}:${ssid}\"; " +
+            "    if [ -z \"$fallback_iface\" ]; then " +
+            "      if [ \"$state\" = \"up\" ] || [ \"$state\" = \"unknown\" ]; then " +
+            "        fallback_iface=\"$iface\"; " +
+            "      fi; " +
+            "    fi; " +
+            "  done; " +
+            "  if [ -z \"$active_iface\" ]; then active_iface=\"$fallback_iface\"; fi; " +
+            "fi; " +
+            "if [ -n \"$active_iface\" ]; then " +
+            "  awk -v iface=\"${active_iface}:\" '$1 == iface' /proc/net/dev; " +
+            "  actual_state=$(cat \"/sys/class/net/${active_iface}/operstate\" 2>/dev/null || echo \"unknown\"); " +
+            "  echo \"OPSTATE:${active_iface}:${actual_state}\"; " +
+            "  if [ -d \"/sys/class/net/${active_iface}/wireless\" ]; then " +
+            "    ssid=$(iwgetid -r \"${active_iface}\" 2>/dev/null); " +
+            "    if [ -z \"$ssid\" ] && command -v iw >/dev/null 2>&1; then " +
+            "      ssid=$(iw dev \"${active_iface}\" link 2>/dev/null | awk -F'SSID: ' '/SSID:/ {print $2}'); " +
+            "    fi; " +
+            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
+            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${active_iface}:yes:\" | cut -d: -f3- | sed 's/\\\\:/:/g'); " +
+            "    fi; " +
+            "    if [ -n \"$ssid\" ]; then echo \"SSID:${active_iface}:${ssid}\"; fi; " +
             "  fi; " +
             "fi"
         ]
