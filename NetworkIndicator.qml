@@ -18,6 +18,7 @@ PluginComponent {
     property string displayUnit: pluginData.displayUnit || "auto"
     // "separate" = show ↑ and ↓ individually, "combined" = single total speed
     property string displayMode: pluginData.displayMode || "separate"
+    property string preferredInterface: pluginData.preferredInterface || "auto"
 
     //DMS vertical bar shifts the widget by half of the widget height so we kinda negate that by adjusting triggerY before toggle manually.
     pillClickAction: function () {
@@ -365,15 +366,38 @@ PluginComponent {
         id: netProcess
         command: [
             "sh", "-c",
+            "PINNED='" + (root.preferredInterface === "auto" ? "" : root.preferredInterface) + "'; " +
+            "if [ -n \"$PINNED\" ]; then " +
+            "  if [ ! -d \"/sys/class/net/$PINNED\" ]; then exit 0; fi; " +
+            "  awk -v iface=\"${PINNED}:\" '$1 == iface' /proc/net/dev; " +
+            "  actual_state=$(cat \"/sys/class/net/${PINNED}/operstate\" 2>/dev/null || echo \"unknown\"); " +
+            "  echo \"OPSTATE:${PINNED}:${actual_state}\"; " +
+            "  if [ -d \"/sys/class/net/${PINNED}/wireless\" ]; then " +
+            "    ssid=$(iwgetid -r \"${PINNED}\" 2>/dev/null); " +
+            "    if [ -z \"$ssid\" ] && command -v iw >/dev/null 2>&1; then " +
+            "      ssid=$(iw dev \"${PINNED}\" link 2>/dev/null | awk -F'SSID: ' '/SSID:/ {print $2}'); " +
+            "    fi; " +
+            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
+            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${PINNED}:yes:\" | cut -d: -f3- | sed 's/\\\\:/:/g'); " +
+            "    fi; " +
+            "    if [ -n \"$ssid\" ]; then echo \"SSID:${PINNED}:${ssid}\"; fi; " +
+            "  fi; " +
+            "  exit 0; " +
+            "fi; " +
             "active_iface=\"\"; fallback_iface=\"\"; " +
             "if command -v ip >/dev/null 2>&1; then " +
-            "  active_iface=$(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}' | head -n 1); " +
+            "  for dev in $(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}'); do " +
+            "    if [ -d \"/sys/class/net/$dev/device\" ]; then " +
+            "      active_iface=\"$dev\"; " +
+            "      break; " +
+            "    fi; " +
+            "  done; " +
             "fi; " +
             "if [ -z \"$active_iface\" ]; then " +
             "  for f in /sys/class/net/*/operstate; do " +
             "    [ -e \"$f\" ] || continue; " +
             "    iface=$(basename \"$(dirname \"$f\")\"); " +
-            "    case \"$iface\" in lo|docker*|br-*|veth*|virbr*|tailscale*|waydroid*|vboxnet*|tun*|tap*) continue ;; esac; " +
+            "    if [ ! -d \"/sys/class/net/$iface/device\" ]; then continue; fi; " +
             "    state=$(cat \"$f\" 2>/dev/null); " +
             "    carrier=$(cat \"/sys/class/net/$iface/carrier\" 2>/dev/null); " +
             "    if [ \"$state\" = \"up\" ] && [ \"$carrier\" = \"1\" ]; then " +
@@ -437,11 +461,6 @@ PluginComponent {
 
                 var parts = trimmed.split(":");
                 var ifaceName = parts[0].trim();
-
-                // Skip loopback and virtual interfaces, use first real interface
-                if (ifaceName === "lo") return;
-                if (ifaceName.startsWith("docker") || ifaceName.startsWith("br-") ||
-                    ifaceName.startsWith("veth") || ifaceName.startsWith("virbr")) return;
 
                 // Lock in this interface for the cycle
                 root._foundThisCycle = true;
