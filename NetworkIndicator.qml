@@ -20,22 +20,7 @@ PluginComponent {
     property string displayMode: pluginData.displayMode || "separate"
     property string preferredInterface: pluginData.preferredInterface || "auto"
 
-    //DMS vertical bar shifts the widget by half of the widget height so we kinda negate that by adjusting triggerY before toggle manually.
-    pillClickAction: function () {
-        let popout = null;
-        for (let i = 0; i < root.data.length; i++) {
-            if (root.data[i] && typeof root.data[i].toggle === "function" && root.data[i].triggerY !== undefined) {
-                popout = root.data[i];
-                break;
-            }
-        }
-        if (popout) {
-            if (root.isVertical) {
-                popout.triggerY += root.height / 2;
-            }
-            popout.toggle();
-        }
-    }
+
 
     // ── Internal state ──
     property real downloadSpeed: 0
@@ -48,6 +33,7 @@ PluginComponent {
     property bool _foundThisCycle: false // per-cycle temp flag (never triggers re-render)
     property string _activeIfaceThisCycle: "" // interface name found this cycle
     property string _activeSsidThisCycle: ""  // ssid found this cycle
+    property bool hasInternet: true  // assume true until first connectivity check completes
 
     // ── Persistent data usage tracking ──
     property var usageData: ({})        // full parsed JSON object
@@ -64,6 +50,16 @@ PluginComponent {
     property real _tempDeltaRx: 0       // temp storage for current cycle
     property real _tempDeltaTx: 0       // temp storage for current cycle
     property real unsavedBytes: 0       // bytes accumulated since last disk write
+
+    // ── Popout state & sizing ──
+    property var activePopout: null
+    property real _computedPopoutWidth: 340
+
+    function updatePopoutHeight() {
+        if (activePopout && typeof activePopout.recalcHeight === "function") {
+            activePopout.recalcHeight();
+        }
+    }
 
     // ── Offline reason detection (uses DMS NetworkService) ──
     property bool _dmsNetworkAvailable: typeof DMSNetworkService !== "undefined" && DMSNetworkService.networkAvailable
@@ -286,32 +282,6 @@ PluginComponent {
         }
     }
 
-    // ── Update Popout Height dynamically ──
-    function updatePopoutHeight() {
-        if (!root.historyExpanded) {
-            root.popoutHeight = root.interfaceFound ? 220 : 250;
-        } else {
-            root._maxDailyUsage = root.getMaxDailyUsage();
-            
-            // We use fixed component heights here to avoid a QML layout race condition.
-            // If we read 'historyLabel.height' in the same frame that the popout expands,
-            // it evaluates to 0, causing the ListView's height to become negative and disappear.
-            // nonListH = historyLabel(18) + spacingS(8) + filters(32) + spacingM(12) + spacingXS(4) + totalSection(44)
-            var nonListH = 118;
-                           
-            var entriesCount = historyModel.count;
-            var listContentH = entriesCount > 0 ? (entriesCount * 36 + (entriesCount - 1) * Theme.spacingXS) : 0;
-            
-            // The extra 8px of padding is added here via `+ Theme.spacingS`
-            // (Theme.spacingS evaluates to exactly 8px in DankMaterialShell)
-            var historyH = nonListH + listContentH + Theme.spacingS;
-            
-            // 232 is collapsedHeight (220) + historySection.topMargin (12).
-            // Without the 12px offset, historySection is 12px shorter than historyH, 
-            // causing the DankListView to clip its bottom entry and show a scrollbar!
-            root.popoutHeight = Math.min(232 + historyH, 600);
-        }
-    }
 
     // ── Timer to poll network stats ──
     Timer {
@@ -357,6 +327,39 @@ PluginComponent {
         onTriggered: {
             if (root.unsavedBytes > 0) {
                 root.saveUsageData();
+            }
+        }
+    }
+
+    // ── Timer to check internet connectivity (20s if connected, 5s if offline) ──
+    Timer {
+        id: connectivityTimer
+        interval: root.hasInternet ? 20000 : 5000
+        running: root.dataLoaded
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: connectivityProcess.running = true
+    }
+
+    // ── Process: checks actual internet reachability with fallback ──
+    Process {
+        id: connectivityProcess
+        command: [
+            "sh", "-c",
+            "code=$(curl -s -o /dev/null -w \"%{http_code}\" --max-time 5 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null); " +
+            "if [ \"$code\" = \"204\" ]; then echo \"CONNECTIVITY:full\"; " +
+            "else " +
+            "  fallback_code=$(curl -s -o /dev/null -w \"%{http_code}\" --max-time 5 http://nmcheck.gnome.org/check_network_status.txt 2>/dev/null); " +
+            "  if [ \"$fallback_code\" = \"200\" ] || [ \"$fallback_code\" = \"204\" ]; then echo \"CONNECTIVITY:full\"; " +
+            "  else echo \"CONNECTIVITY:none\"; fi; " +
+            "fi"
+        ]
+        stdout: SplitParser {
+            onRead: line => {
+                if (line.startsWith("CONNECTIVITY:")) {
+                    var status = line.split(":")[1].trim();
+                    root.hasInternet = (status === "full");
+                }
             }
         }
     }
@@ -622,7 +625,7 @@ PluginComponent {
             // ── Offline state: differentiate wifi_off vs disconnected ──
             DankIcon {
                 visible: !root.interfaceFound
-                name: "speed"
+                name: "android_wifi_3_bar_off"
                 size: root.iconSize + 3
                 weight: 700
                 color: Theme.error
@@ -638,7 +641,7 @@ PluginComponent {
                 DankIcon {
                     name: "import_export"
                     size: root.iconSize
-                    color: root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
+                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
                     anchors.verticalCenter: parent.verticalCenter
                     weight: 700
                     Behavior on color {
@@ -663,7 +666,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_upward"
                     size: root.iconSize
-                    color: root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText
+                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText)
                     anchors.verticalCenter: parent.verticalCenter
                     weight: 700
                     
@@ -688,7 +691,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_downward"
                     size: root.iconSize
-                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
+                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
                     anchors.verticalCenter: parent.verticalCenter
                     weight: 700
                     
@@ -715,7 +718,7 @@ PluginComponent {
             // ── Offline state: differentiate wifi_off vs disconnected ──
             DankIcon {
                 visible: !root.interfaceFound
-                name: "speed"
+                name: "android_wifi_3_bar_off"
                 size: root.iconSize + 3
                 color: Theme.error
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -731,7 +734,7 @@ PluginComponent {
                 DankIcon {
                     name: "import_export"
                     size: root.iconSize
-                    color: root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
+                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
                     anchors.horizontalCenter: parent.horizontalCenter
                     weight: 700
 
@@ -744,7 +747,7 @@ PluginComponent {
                     text: root.formatSpeed(root.totalSpeed).replace(" ", "\n")
                     horizontalAlignment: Text.AlignHCenter
                     font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
-                    color: Theme.surfaceText
+                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : Theme.surfaceText
                 }
             }
 
@@ -757,7 +760,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_upward"
                     size: root.iconSize
-                    color: root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText
+                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText)
                     anchors.horizontalCenter: parent.horizontalCenter
                     weight: 700
                     
@@ -782,7 +785,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_downward"
                     size: root.iconSize
-                    color: root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText
+                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
                     anchors.horizontalCenter: parent.horizontalCenter
                     weight: 700
                     
@@ -805,13 +808,49 @@ PluginComponent {
         PopoutComponent {
             id: popoutColumn
             showCloseButton: false
+
+            Component.onCompleted: root.activePopout = popoutColumn
+            Component.onDestruction: {
+                if (root.activePopout === popoutColumn) root.activePopout = null;
+            }
+
+            function recalcHeight() {
+                root._computedPopoutWidth = Math.max(340, stickyTop.implicitWidth + Theme.spacingL * 2);
+                if (!root.historyExpanded) {
+                    root.popoutHeight = Math.max(200, stickyTop.implicitHeight + Theme.spacingXL);
+                } else {
+                    root._maxDailyUsage = root.getMaxDailyUsage();
+                    var maxH = root.parentScreen && root.parentScreen.height ? Math.min(root.parentScreen.height * 0.7, 700) : 600;
+                    var historyH = historySection.implicitHeight;
+                    
+                    root.popoutHeight = Math.min(stickyTop.implicitHeight + Theme.spacingM + historyH + Theme.spacingXL, maxH);
+                }
+            }
+
             onVisibleChanged: {
                 if (visible) {
                     root.historyExpanded = false;
-                    root.popoutHeight = root.interfaceFound ? 220 : 250;
+                    recalcHeight();
                 } else {
                     root.selectedNetworkFilter = "All";
                 }
+            }
+
+            Connections {
+                target: root
+                function onInterfaceFoundChanged() { if (popoutColumn.visible) recalcHeight(); }
+                function onHasInternetChanged() { if (popoutColumn.visible) recalcHeight(); }
+                function onHistoryExpandedChanged() { if (popoutColumn.visible) recalcHeight(); }
+            }
+
+            Connections {
+                target: historySection
+                function onImplicitHeightChanged() { if (popoutColumn.visible && root.historyExpanded) recalcHeight(); }
+            }
+
+            Connections {
+                target: stickyTop
+                function onImplicitHeightChanged() { if (popoutColumn.visible) recalcHeight(); }
             }
 
             Item {
@@ -834,7 +873,7 @@ PluginComponent {
                             spacing: 2
 
                             StyledText {
-                                text: "Network Monitor"
+                                text: "Network Indicator"
                                 font.pixelSize: Theme.fontSizeLarge
                                 font.weight: Font.Bold
                                 color: Theme.surfaceText
@@ -849,6 +888,52 @@ PluginComponent {
                                 color: Theme.error
                                 horizontalAlignment: Text.AlignHCenter
                                 width: parent.width
+                            }
+                        }
+
+                        // ── No Internet banner (connected locally but no internet) ──
+                        StyledRect {
+                            visible: root.interfaceFound && !root.hasInternet
+                            width: parent.width
+                            height: noInternetBannerCol.implicitHeight + Theme.spacingM * 2
+                            radius: Theme.cornerRadius
+                            color: Qt.rgba(Theme.warning.r, Theme.warning.g, Theme.warning.b, 0.08)
+
+                            Row {
+                                anchors.fill: parent
+                                anchors.margins: Theme.spacingM
+                                spacing: Theme.spacingS
+
+                                DankIcon {
+                                    id: noInternetIcon
+                                    name: "android_wifi_3_bar_alert"
+                                    size: Theme.iconSizeLarge
+                                    color: Theme.warning
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                Column {
+                                    id: noInternetBannerCol
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: parent.width - noInternetIcon.width - Theme.spacingS
+                                    spacing: 2
+
+                                    StyledText {
+                                        text: "No internet access"
+                                        font.pixelSize: Theme.fontSizeMedium
+                                        font.weight: Font.Bold
+                                        color: Theme.warning
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+                                    StyledText {
+                                        text: "No internet access"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.surfaceVariantText
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+                                }
                             }
                         }
 
@@ -872,8 +957,9 @@ PluginComponent {
                                 spacing: Theme.spacingS
 
                                 DankIcon {
+                                    id: offlineIcon
                                     name: root.offlineReason === "wifi_off" ? "wifi_off" : "signal_wifi_off"
-                                    size: 28
+                                    size: Theme.iconSizeLarge
                                     color: Theme.error
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
@@ -881,7 +967,7 @@ PluginComponent {
                                 Column {
                                     id: offlineBannerCol
                                     anchors.verticalCenter: parent.verticalCenter
-                                    width: parent.width - 28 - chevronIcon.width - Theme.spacingS * 2
+                                    width: parent.width - offlineIcon.width - chevronIcon.width - Theme.spacingS * 2
                                     spacing: 2
 
                                     StyledText {
@@ -908,7 +994,7 @@ PluginComponent {
                                 DankIcon {
                                     id: chevronIcon
                                     name: "chevron_right"
-                                    size: 20
+                                    size: Theme.iconSizeSmall
                                     color: Theme.surfaceVariantText
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
@@ -935,17 +1021,18 @@ PluginComponent {
                             // Download card
                             StyledRect {
                                 width: (parent.width - Theme.spacingS) / 2
-                                height: 70
+                                implicitHeight: Math.max(70, downloadCol.implicitHeight + Theme.spacingM * 2)
                                 radius: Theme.cornerRadius
                                 color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
 
                                 Column {
+                                    id: downloadCol
                                     anchors.centerIn: parent
                                     spacing: 2
 
                                     DankIcon {
                                         name: "download"
-                                        size: 24
+                                        size: Theme.iconSize
                                         color: Theme.primary
                                         anchors.horizontalCenter: parent.horizontalCenter
                                     }
@@ -962,17 +1049,18 @@ PluginComponent {
                             // Upload card
                             StyledRect {
                                 width: (parent.width - Theme.spacingS) / 2
-                                height: 70
+                                implicitHeight: Math.max(70, uploadCol.implicitHeight + Theme.spacingM * 2)
                                 radius: Theme.cornerRadius
                                 color: Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.2)
 
                                 Column {
+                                    id: uploadCol
                                     anchors.centerIn: parent
                                     spacing: 2
 
                                     DankIcon {
                                         name: "upload"
-                                        size: 24
+                                        size: Theme.iconSize
                                         color: Theme.error
                                         anchors.horizontalCenter: parent.horizontalCenter
                                     }
@@ -991,26 +1079,29 @@ PluginComponent {
                     StyledRect {
                         id: dataUsedCard
                         width: parent.width
-                        height: 70
+                        implicitHeight: Math.max(70, dataUsedRow.implicitHeight + Theme.spacingM * 2)
                         radius: Theme.cornerRadius
                         color: Qt.rgba(Theme.surfaceContainerHigh.r, Theme.surfaceContainerHigh.g, Theme.surfaceContainerHigh.b, 0.5)
 
                         Row {
+                            id: dataUsedRow
                             anchors.fill: parent
                             anchors.margins: Theme.spacingM
                             spacing: Theme.spacingM
 
                             DankIcon {
+                                id: dataUsageIcon
                                 name: "data_usage"
-                                size: 24
+                                size: Theme.iconSize
                                 color: Theme.surfaceVariantText
                                 anchors.verticalCenter: parent.verticalCenter
                             }
 
                             Column {
+                                id: dataUsedCol
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 2
-                                width: parent.width - 24 - Theme.spacingM - expandIcon.width - Theme.spacingM
+                                width: parent.width - dataUsageIcon.width - Theme.spacingM - expandIcon.width - Theme.spacingM
 
                                 StyledText {
                                     text: "Data Used Today"
@@ -1028,7 +1119,7 @@ PluginComponent {
                             DankIcon {
                                 id: expandIcon
                                 name: "expand_more"
-                                size: 20
+                                size: Theme.iconSizeSmall
                                 color: Theme.surfaceVariantText
                                 anchors.verticalCenter: parent.verticalCenter
                                 rotation: root.historyExpanded ? 180 : 0
@@ -1051,7 +1142,7 @@ PluginComponent {
                                     filtersFlickable.contentX = 0;
                                     historyListView.positionViewAtBeginning();
                                 }
-                                root.updatePopoutHeight();
+                                Qt.callLater(recalcHeight);
                             }
                         }
                     }
@@ -1060,6 +1151,7 @@ PluginComponent {
                 // ── 30-Day History Section (anchored below sticky top) ──
                 Item {
                     id: historySection
+                    implicitHeight: historyLabel.implicitHeight + Theme.spacingS + filtersFlickable.height + Theme.spacingM + historyListView.contentHeight + Theme.spacingXS + totalSection.height
                     anchors.top: stickyTop.bottom
                     anchors.topMargin: root.historyExpanded ? Theme.spacingM : 0
                     anchors.bottom: parent.bottom
@@ -1094,7 +1186,7 @@ PluginComponent {
                         anchors.topMargin: Theme.spacingS
                         anchors.left: parent.left
                         anchors.right: parent.right
-                        height: 32
+                        height: Math.max(32, filtersRow.implicitHeight)
                         contentWidth: filtersRow.implicitWidth
                         boundsBehavior: Flickable.StopAtBounds
                         clip: true
@@ -1109,9 +1201,9 @@ PluginComponent {
                                 StyledRect {
                                     id: filterChip
                                     required property string name
-                                    height: 32
+                                    height: Math.max(32, filterText.implicitHeight + Theme.spacingS * 2)
                                     width: filterText.implicitWidth + Theme.spacingM * 2
-                                    radius: 16
+                                    radius: height / 2
                                     color: root.selectedNetworkFilter === filterChip.name 
                                         ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
                                         : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
@@ -1135,7 +1227,7 @@ PluginComponent {
                                         onClicked: {
                                             root.selectedNetworkFilter = filterChip.name;
                                             root.refreshHistoryModel();
-                                            root.updatePopoutHeight();
+                                            Qt.callLater(root.updatePopoutHeight);
                                         }
                                     }
                                 }
@@ -1161,11 +1253,11 @@ PluginComponent {
                         ScrollBar.vertical: ScrollBar {
                             id: historyScrollBar
                             policy: ScrollBar.AsNeeded
-                            implicitWidth: 10
+                            implicitWidth: Theme.spacingS + 2
                             background: Item {}
                             contentItem: Rectangle {
-                                implicitWidth: 8
-                                radius: 25
+                                implicitWidth: Theme.spacingS
+                                radius: implicitWidth / 2
                                 color: Qt.rgba(
                                     Theme.surfaceVariantText.r,
                                     Theme.surfaceVariantText.g,
@@ -1186,14 +1278,15 @@ PluginComponent {
                             required property real tx
                             required property int index
                             
-                            width: historyListView.width - 13
-                            height: 36
+                            width: historyListView.width - historyScrollBar.implicitWidth - 3
+                            height: Math.max(36, historyRowContent.implicitHeight + Theme.spacingS * 2)
                             radius: Theme.cornerRadius / 2
                             color: historyRow.date === root.todayKey
                                 ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
                                 : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
 
                             Row {
+                                id: historyRowContent
                                 anchors.fill: parent
                                 anchors.leftMargin: Theme.spacingS
                                 anchors.rightMargin: Theme.spacingS
@@ -1213,14 +1306,14 @@ PluginComponent {
                                 // Usage bar
                                 Item {
                                     width: Math.max(0, parent.width - dateLabel.width - totalLabel.width - Theme.spacingS * 3)
-                                    height: 8
+                                    height: Theme.spacingS
                                     clip: true
                                     anchors.verticalCenter: parent.verticalCenter
 
                                     StyledRect {
                                         width: parent.width
                                         height: parent.height
-                                        radius: 4
+                                        radius: height / 2
                                         color: Qt.rgba(Theme.surfaceVariantText.r,
                                                        Theme.surfaceVariantText.g,
                                                        Theme.surfaceVariantText.b, 0.1)
@@ -1229,7 +1322,7 @@ PluginComponent {
                                     StyledRect {
                                         width: Math.max(2, parent.width * (historyRow.total / root._maxDailyUsage))
                                         height: parent.height
-                                        radius: 4
+                                        radius: height / 2
                                         color: historyRow.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
 
                                         Behavior on width {
@@ -1259,7 +1352,7 @@ PluginComponent {
                         width: parent.width
                         height: totalRow.height + Theme.spacingS
                         opacity: 0
-                        transform: Translate { id: totalRowTranslate; y: 8 }
+                        transform: Translate { id: totalRowTranslate; y: Theme.spacingS }
 
                         Component.onCompleted: {
                             totalRowEntranceAnim.start();
@@ -1290,11 +1383,12 @@ PluginComponent {
                             id: totalRow
                             y: Theme.spacingS
                             width: parent.width
-                            height: 36
+                            height: Math.max(36, totalRowContent.implicitHeight + Theme.spacingS * 2)
                             radius: Theme.cornerRadius / 2
                             color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.08)
 
                             Row {
+                                id: totalRowContent
                                 anchors.fill: parent
                                 anchors.leftMargin: Theme.spacingS
                                 anchors.rightMargin: Theme.spacingS
@@ -1331,7 +1425,7 @@ PluginComponent {
         }
     }
 
-    popoutWidth: 325
+    popoutWidth: root._computedPopoutWidth
     popoutHeight: 220
 
     Behavior on popoutHeight {

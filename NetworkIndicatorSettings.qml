@@ -110,8 +110,8 @@ PluginSettings {
 
         Rectangle {
             id: refreshBtn
-            implicitWidth: 36
             implicitHeight: 36
+            implicitWidth: 36
             radius: Theme.cornerRadius
             color: refreshArea.containsMouse ? Theme.primaryHoverLight : "transparent"
             anchors.right: parent.right

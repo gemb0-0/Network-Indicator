@@ -1,18 +1,17 @@
 # 🌐 Network Indicator — DankBar Widget
 
-A real-time network speed and data usage monitor plugin for [DankMaterialShell](https://danklinux.com/docs/dankmaterialshell/overview). It shows upload (↑) and download (↓) speeds directly in your DankBar, and automatically tracks your daily data usage!
+A real-time network speed and data usage monitor plugin for [DankMaterialShell](https://danklinux.com/docs/dankmaterialshell/overview). It internet speed directly in your DankBar, and automatically tracks your daily data usage!
 
 ![Screenshot 1](screenshot.png)
 ![Screenshot 2](screenshot2.png)
 
 ## ✨ Features
 
-- 📊 **Live upload & download speeds** right in your DankBar
-- 📅 **30-day data usage history** — persistent across reboots
-- 🔌 **Automatic offline detection** — shows when your connection drops
-- ↕️ **Works in horizontal and vertical bars**
-- ⚙️ **Configurable** — combined or separate speed readouts, adjustable units & polling rate
-- 🪶 **Zero dependencies** — pure Linux, no extra packages needed
+- 📊 **Live speeds:** Monitor upload & download speeds right in your DankBar.
+- 📅 **30-day data usage history:** Persistent tracking of your network data over the past month.
+- 🔌 **Smart offline detection:** Differentiates between being disconnected locally versus connected to a router with no outbound internet access.
+- ↕️ **Responsive design:** Works flawlessly in both horizontal and vertical DankBars.
+- ⚙️ **Highly configurable:** Pin specific network interfaces, combine or separate speed readouts, and adjust units & polling rates.
 
 ## 📦 Installation
 
@@ -46,23 +45,28 @@ dms restart
 
 ## 🎛️ Settings
 
+You can configure the plugin directly via the DMS Plugin Settings UI:
+
 | Setting | Description | Default |
 |---------|-------------|---------|
-| **Update Interval** | Polling frequency in seconds (e.g., `1` to `10`) | 2 sec |
-| **Display Unit** | Auto / KB/s / MB/s | Auto |
-| **Display Mode** | **Separate** (show ↑ and ↓) or **Combined** (single total speed) | Separate |
+| **Update Interval** | How often to poll network statistics (1 to 10 seconds). | 2 sec |
+| **Interface** | Select a specific network interface to track, or allow the plugin to automatically detect the active connection. | Auto-detect |
+| **Display Unit** | Choose how speeds are displayed: Auto, KB/s, or MB/s. | Auto |
+| **Display Mode** | **Separate** (show ↑ and ↓ individually) or **Combined** (single total speed). | Separate |
 
 ## 🛠️ How It Works
 
-The plugin reads Linux's built-in network statistics — no external tools required.
+The plugin intelligently combines Linux's built-in system files with standard networking tools to provide an accurate representation of your network state:
 
-| What | Source | Purpose |
+| Component | Source / Tool | Purpose |
 |------|--------|---------|
-| Byte counters | `/proc/net/dev` | Calculates upload/download speed deltas each poll |
-| Link state | `/sys/class/net/*/operstate` | Detects online/offline instantly |
-| Persistence | DMS Plugin State API | Saves daily usage across reboots (30-day rolling window) |
+| **Byte Counters** | `/proc/net/dev` | Calculates pure upload/download speed deltas every polling cycle. |
+| **Link State** | `/sys/class/net/*/operstate` | Detects physical/local network connections instantly. |
+| **Network Name** | `iwgetid` / `iw` / `nmcli` | Fetches the SSID of the currently connected Wi-Fi network. |
+| **Internet Check** | `curl` (Google/GNOME) | Verifies actual internet availability using a dual-check fallback system (gstatic.com → nmcheck.gnome.org). |
+| **Persistence** | DMS Plugin State API | Saves daily usage per network across reboots within a 30-day rolling window. |
 
-It automatically finds your active network interface, ignoring loopback and virtual interfaces (docker, veth, etc.).
+It automatically finds your active network interface by parsing routing tables (`ip route`), ignoring loopback and virtual interfaces (docker, veth, etc.), unless you explicitly pin an interface in the settings.
 
 ## 📄 License
 
