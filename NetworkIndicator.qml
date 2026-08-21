@@ -10,6 +10,17 @@ import qs.Modules.Plugins
 PluginComponent {
     id: root
 
+    QtObject {
+        id: dims
+        readonly property real popoutWidth: 340
+        readonly property real panelHeightRatio: 0.75
+        readonly property real cardMinHeight: 70
+        readonly property real chipMinHeight: 32
+        readonly property real rowMinHeight: 22
+        readonly property real dateLabelMinWidth: 50
+        readonly property real valueLabelMinWidth: 65
+        readonly property real offlineIconDelta: 3
+    }
 
     layerNamespacePlugin: "network-indicator"
 
@@ -50,16 +61,6 @@ PluginComponent {
     property real _tempDeltaRx: 0       // temp storage for current cycle
     property real _tempDeltaTx: 0       // temp storage for current cycle
     property real unsavedBytes: 0       // bytes accumulated since last disk write
-
-    // ── Popout state & sizing ──
-    property var activePopout: null
-    property real _computedPopoutWidth: 340
-
-    function updatePopoutHeight() {
-        if (activePopout && typeof activePopout.recalcHeight === "function") {
-            activePopout.recalcHeight();
-        }
-    }
 
     // ── Offline reason detection (uses DMS NetworkService) ──
     property bool _dmsNetworkAvailable: typeof DMSNetworkService !== "undefined" && DMSNetworkService.networkAvailable
@@ -626,7 +627,7 @@ PluginComponent {
             DankIcon {
                 visible: !root.interfaceFound
                 name: "android_wifi_3_bar_off"
-                size: root.iconSize + 3
+                size: root.iconSize + dims.offlineIconDelta
                 weight: 700
                 color: Theme.error
                 anchors.verticalCenter: parent.verticalCenter
@@ -719,7 +720,7 @@ PluginComponent {
             DankIcon {
                 visible: !root.interfaceFound
                 name: "android_wifi_3_bar_off"
-                size: root.iconSize + 3
+                size: root.iconSize + dims.offlineIconDelta
                 color: Theme.error
                 anchors.horizontalCenter: parent.horizontalCenter
                 weight: 700
@@ -809,53 +810,17 @@ PluginComponent {
             id: popoutColumn
             showCloseButton: false
 
-            Component.onCompleted: root.activePopout = popoutColumn
-            Component.onDestruction: {
-                if (root.activePopout === popoutColumn) root.activePopout = null;
-            }
-
-            function recalcHeight() {
-                root._computedPopoutWidth = Math.max(340, stickyTop.implicitWidth + Theme.spacingL * 2);
-                if (!root.historyExpanded) {
-                    root.popoutHeight = Math.max(200, stickyTop.implicitHeight + Theme.spacingXL);
-                } else {
-                    root._maxDailyUsage = root.getMaxDailyUsage();
-                    var maxH = root.parentScreen && root.parentScreen.height ? Math.min(root.parentScreen.height * 0.7, 700) : 600;
-                    var historyH = historySection.implicitHeight;
-                    
-                    root.popoutHeight = Math.min(stickyTop.implicitHeight + Theme.spacingM + historyH + Theme.spacingXL, maxH);
-                }
-            }
-
             onVisibleChanged: {
                 if (visible) {
                     root.historyExpanded = false;
-                    recalcHeight();
                 } else {
                     root.selectedNetworkFilter = "All";
                 }
             }
 
-            Connections {
-                target: root
-                function onInterfaceFoundChanged() { if (popoutColumn.visible) recalcHeight(); }
-                function onHasInternetChanged() { if (popoutColumn.visible) recalcHeight(); }
-                function onHistoryExpandedChanged() { if (popoutColumn.visible) recalcHeight(); }
-            }
-
-            Connections {
-                target: historySection
-                function onImplicitHeightChanged() { if (popoutColumn.visible && root.historyExpanded) recalcHeight(); }
-            }
-
-            Connections {
-                target: stickyTop
-                function onImplicitHeightChanged() { if (popoutColumn.visible) recalcHeight(); }
-            }
-
             Item {
                 width: parent.width
-                implicitHeight: root.popoutHeight - Theme.spacingXL
+                implicitHeight: stickyTop.implicitHeight + (root.historyExpanded ? Theme.spacingM + historySection.height : 0)
 
                 // ── Sticky top section (does not scroll) ──
                 Column {
@@ -1021,7 +986,7 @@ PluginComponent {
                             // Download card
                             StyledRect {
                                 width: (parent.width - Theme.spacingS) / 2
-                                implicitHeight: Math.max(70, downloadCol.implicitHeight + Theme.spacingM * 2)
+                                implicitHeight: Math.max(dims.cardMinHeight, downloadCol.implicitHeight + Theme.spacingM * 2)
                                 radius: Theme.cornerRadius
                                 color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
 
@@ -1049,7 +1014,7 @@ PluginComponent {
                             // Upload card
                             StyledRect {
                                 width: (parent.width - Theme.spacingS) / 2
-                                implicitHeight: Math.max(70, uploadCol.implicitHeight + Theme.spacingM * 2)
+                                implicitHeight: Math.max(dims.cardMinHeight, uploadCol.implicitHeight + Theme.spacingM * 2)
                                 radius: Theme.cornerRadius
                                 color: Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.2)
 
@@ -1079,7 +1044,7 @@ PluginComponent {
                     StyledRect {
                         id: dataUsedCard
                         width: parent.width
-                        implicitHeight: Math.max(70, dataUsedRow.implicitHeight + Theme.spacingM * 2)
+                        implicitHeight: Math.max(dims.cardMinHeight, dataUsedRow.implicitHeight + Theme.spacingM * 2)
                         radius: Theme.cornerRadius
                         color: Qt.rgba(Theme.surfaceContainerHigh.r, Theme.surfaceContainerHigh.g, Theme.surfaceContainerHigh.b, 0.5)
 
@@ -1139,10 +1104,10 @@ PluginComponent {
                                 if (root.historyExpanded) {
                                     root.refreshNetworksModel();
                                     root.refreshHistoryModel();
+                                    root._maxDailyUsage = root.getMaxDailyUsage();
                                     filtersFlickable.contentX = 0;
                                     historyListView.positionViewAtBeginning();
                                 }
-                                Qt.callLater(recalcHeight);
                             }
                         }
                     }
@@ -1151,10 +1116,12 @@ PluginComponent {
                 // ── 30-Day History Section (anchored below sticky top) ──
                 Item {
                     id: historySection
-                    implicitHeight: historyLabel.implicitHeight + Theme.spacingS + filtersFlickable.height + Theme.spacingM + historyListView.contentHeight + Theme.spacingXS + totalSection.height
+                    property real naturalHeight: historyLabel.implicitHeight + Theme.spacingS + filtersFlickable.height + Theme.spacingM + historyListView.contentHeight + Theme.spacingXS + totalSection.height
+                    property real expandedHeight: Math.min(naturalHeight, Math.max(0, (root.parentScreen && root.parentScreen.height ? root.parentScreen.height * dims.panelHeightRatio : 0) - stickyTop.implicitHeight - Theme.spacingM))
+                    implicitHeight: height
+                    height: root.historyExpanded ? expandedHeight : 0
                     anchors.top: stickyTop.bottom
                     anchors.topMargin: root.historyExpanded ? Theme.spacingM : 0
-                    anchors.bottom: parent.bottom
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.leftMargin: Theme.spacingM
@@ -1162,6 +1129,10 @@ PluginComponent {
                     visible: root.historyExpanded
                     opacity: root.historyExpanded ? 1.0 : 0.0
                     clip: true
+
+                    Behavior on height {
+                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                    }
 
                     Behavior on opacity {
                         NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
@@ -1186,7 +1157,7 @@ PluginComponent {
                         anchors.topMargin: Theme.spacingS
                         anchors.left: parent.left
                         anchors.right: parent.right
-                        height: Math.max(32, filtersRow.implicitHeight)
+                        height: Math.max(dims.chipMinHeight, filtersRow.implicitHeight)
                         contentWidth: filtersRow.implicitWidth
                         boundsBehavior: Flickable.StopAtBounds
                         clip: true
@@ -1201,7 +1172,7 @@ PluginComponent {
                                 StyledRect {
                                     id: filterChip
                                     required property string name
-                                    height: Math.max(32, filterText.implicitHeight + Theme.spacingS * 2)
+                                    height: Math.max(dims.chipMinHeight, filterText.implicitHeight + Theme.spacingS * 2)
                                     width: filterText.implicitWidth + Theme.spacingM * 2
                                     radius: height / 2
                                     color: root.selectedNetworkFilter === filterChip.name 
@@ -1227,7 +1198,7 @@ PluginComponent {
                                         onClicked: {
                                             root.selectedNetworkFilter = filterChip.name;
                                             root.refreshHistoryModel();
-                                            Qt.callLater(root.updatePopoutHeight);
+                                            root._maxDailyUsage = root.getMaxDailyUsage();
                                         }
                                     }
                                 }
@@ -1279,7 +1250,7 @@ PluginComponent {
                             required property int index
                             
                             width: historyListView.width - historyScrollBar.implicitWidth - 3
-                            height: Math.max(36, historyRowContent.implicitHeight + Theme.spacingS * 2)
+                            height: Math.max(dims.rowMinHeight, historyRowContent.implicitHeight + Theme.spacingS * 2)
                             radius: Theme.cornerRadius / 2
                             color: historyRow.date === root.todayKey
                                 ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
@@ -1299,7 +1270,7 @@ PluginComponent {
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.weight: historyRow.date === root.todayKey ? Font.Bold : Font.Normal
                                     color: historyRow.date === root.todayKey ? Theme.primary : Theme.surfaceVariantText
-                                    width: Math.max(50, implicitWidth)
+                                    width: Math.max(dims.dateLabelMinWidth, implicitWidth)
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
 
@@ -1338,7 +1309,7 @@ PluginComponent {
                                     font.pixelSize: Theme.fontSizeSmall
                                     color: historyRow.date === root.todayKey ? Theme.primary : Theme.surfaceText
                                     horizontalAlignment: Text.AlignRight
-                                    width: Math.max(65, implicitWidth)
+                                    width: Math.max(dims.valueLabelMinWidth, implicitWidth)
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
                             }
@@ -1383,7 +1354,7 @@ PluginComponent {
                             id: totalRow
                             y: Theme.spacingS
                             width: parent.width
-                            height: Math.max(36, totalRowContent.implicitHeight + Theme.spacingS * 2)
+                            height: Math.max(dims.rowMinHeight, totalRowContent.implicitHeight + Theme.spacingS * 2)
                             radius: Theme.cornerRadius / 2
                             color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.08)
 
@@ -1398,12 +1369,12 @@ PluginComponent {
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.weight: Font.Bold
                                     color: Theme.surfaceText
-                                    width: Math.max(50, implicitWidth)
+                                    width: Math.max(dims.dateLabelMinWidth, implicitWidth)
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
 
                                 Item {
-                                    width: parent.width - 50 - Math.max(65, overallLabel.implicitWidth) - Theme.spacingS
+                                    width: parent.width - dims.dateLabelMinWidth - Math.max(dims.valueLabelMinWidth, overallLabel.implicitWidth) - Theme.spacingS
                                     height: 1
                                 }
 
@@ -1414,7 +1385,7 @@ PluginComponent {
                                     font.weight: Font.Bold
                                     color: Theme.surfaceText
                                     horizontalAlignment: Text.AlignRight
-                                    width: Math.max(65, implicitWidth)
+                                    width: Math.max(dims.valueLabelMinWidth, implicitWidth)
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
                             }
@@ -1425,10 +1396,5 @@ PluginComponent {
         }
     }
 
-    popoutWidth: root._computedPopoutWidth
-    popoutHeight: 220
-
-    Behavior on popoutHeight {
-        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-    }
+    popoutWidth: dims.popoutWidth
 }
