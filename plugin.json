@@ -1,8 +1,8 @@
 {
     "id": "networkIndicator",
     "name": "Network Indicator",
-    "description": "Real-time network speed monitor for DankBar showing upload and download speeds",
-    "version": "1.5.0",
+    "description": "Real-time network speed monitor for DankBar showing upload and download speeds, daily data usage, and connectivity status.",
+    "version": "1.5.5",
     "author": "gemb0_0",
     "icon": "speed",
     "type": "widget",

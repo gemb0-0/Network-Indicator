@@ -1,6 +1,6 @@
 # 🌐 Network Indicator — DankBar Widget
 
-A real-time network speed and data usage monitor plugin for [DankMaterialShell](https://danklinux.com/docs/dankmaterialshell/overview). It internet speed directly in your DankBar, and automatically tracks your daily data usage!
+A real time network speed and data usage monitor plugin for [DankMaterialShell](https://danklinux.com/docs/dankmaterialshell/overview). It internet speed directly in your DankBar, and automatically tracks your daily data usage!
 
 ![Screenshot 1](screenshot.png)
 ![Screenshot 2](screenshot2.png)
@@ -53,6 +53,7 @@ You can configure the plugin directly via the DMS Plugin Settings UI:
 | **Interface** | Select a specific network interface to track, or allow the plugin to automatically detect the active connection. | Auto-detect |
 | **Display Unit** | Choose how speeds are displayed: Auto, KB/s, or MB/s. | Auto |
 | **Display Mode** | **Separate** (show ↑ and ↓ individually) or **Combined** (single total speed). | Separate |
+| **Check Internet Connectivity** | Periodically checks outbound reachability (via NetworkManager or curl probe). Can be toggled off for full privacy. | Enabled |
 
 ## 🛠️ How It Works
 
@@ -63,7 +64,7 @@ The plugin intelligently combines Linux's built-in system files with standard ne
 | **Byte Counters** | `/proc/net/dev` | Calculates pure upload/download speed deltas every polling cycle. |
 | **Link State** | `/sys/class/net/*/operstate` | Detects physical/local network connections instantly. |
 | **Network Name** | `iwgetid` / `iw` / `nmcli` | Fetches the SSID of the currently connected Wi-Fi network. |
-| **Internet Check** | `curl` (Google/GNOME) | Verifies actual internet availability using a dual-check fallback system (gstatic.com → nmcheck.gnome.org). |
+| **Internet Check** | `nmcli` / Route Gate / `curl` | Verifies actual internet availability using a layered system: NetworkManager connectivity check, instant default route gate, and a hardened dual-endpoint curl probe (with captive portal detection). |
 | **Persistence** | DMS Plugin State API | Saves daily usage per network across reboots within a 30-day rolling window. |
 
 It automatically finds your active network interface by parsing routing tables (`ip route`), ignoring loopback and virtual interfaces (docker, veth, etc.), unless you explicitly pin an interface in the settings.

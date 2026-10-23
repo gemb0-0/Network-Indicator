@@ -169,4 +169,11 @@ PluginSettings {
         ]
         defaultValue: "separate"
     }
+
+    ToggleSetting {
+        settingKey: "checkConnectivity"
+        label: "Check Internet Connectivity"
+        description: "Periodically check actual internet reachability via NetworkManager or fallback endpoints (gstatic.com, nmcheck.gnome.org). Disable if you prefer not to make outbound connectivity checks."
+        defaultValue: true
+    }
 }

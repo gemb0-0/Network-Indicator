@@ -30,8 +30,8 @@ PluginComponent {
     // "separate" = show ↑ and ↓ individually, "combined" = single total speed
     property string displayMode: pluginData.displayMode || "separate"
     property string preferredInterface: pluginData.preferredInterface || "auto"
-
-
+    property bool checkConnectivity: pluginData.checkConnectivity !== undefined ? pluginData.checkConnectivity : true
+    onCheckConnectivityChanged: _consecutiveFailures = 0
 
     // ── Internal state ──
     property real downloadSpeed: 0
@@ -44,7 +44,11 @@ PluginComponent {
     property bool _foundThisCycle: false // per-cycle temp flag (never triggers re-render)
     property string _activeIfaceThisCycle: "" // interface name found this cycle
     property string _activeSsidThisCycle: ""  // ssid found this cycle
-    property bool hasInternet: true  // assume true until first connectivity check completes
+    property string _cachedSsid: ""           // cached SSID across cycles to avoid redundant lookups
+    property string connectivityState: "full" // "full" | "portal" | "limited" | "none" | "unknown"
+    property string connectivitySource: "init" // "nm" | "curl" | "route" | "init"
+    property int _consecutiveFailures: 0      // debouncing counter for offline/limited state
+    property bool hasInternet: !checkConnectivity || connectivityState === "full" || connectivityState === "unknown"
 
     // ── Persistent data usage tracking ──
     property var usageData: ({})        // full parsed JSON object
@@ -68,6 +72,12 @@ PluginComponent {
         if (root.interfaceFound) return "";
         if (_dmsNetworkAvailable && !DMSNetworkService.wifiEnabled) return "wifi_off";
         return "disconnected";
+    }
+
+    function indicatorIconColor(speed, activeColor) {
+        if (!root.hasInternet && root.interfaceFound) return Theme.warning;
+        if (speed > 0) return activeColor;
+        return Theme.surfaceVariantText;
     }
 
     // ── Formatting helpers ──
@@ -235,9 +245,7 @@ PluginComponent {
             entries.push({
                 date: keys[i],
                 label: formatDateLabel(keys[i]),
-                total: r + t,
-                rx: r,
-                tx: t
+                total: r + t
             });
         }
         return entries;
@@ -260,7 +268,7 @@ PluginComponent {
         for (var i = 0; i < entries.length; i++) {
             sum += entries[i].total;
         }
-        return { total: sum, dayCount: entries.length };
+        return sum;
     }
 
     // ── Stable ListModel caches (avoid Repeater model rebuild on poll) ──
@@ -336,30 +344,88 @@ PluginComponent {
     Timer {
         id: connectivityTimer
         interval: root.hasInternet ? 20000 : 5000
-        running: root.dataLoaded
+        running: root.dataLoaded && root.checkConnectivity
         repeat: true
         triggeredOnStart: true
         onTriggered: connectivityProcess.running = true
     }
 
-    // ── Process: checks actual internet reachability with fallback ──
+    // ── Process: checks actual internet reachability with NM -> Route Gate -> curl fallback ──
     Process {
         id: connectivityProcess
         command: [
             "sh", "-c",
-            "code=$(curl -s -o /dev/null -w \"%{http_code}\" --max-time 5 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null); " +
-            "if [ \"$code\" = \"204\" ]; then echo \"CONNECTIVITY:full\"; " +
-            "else " +
-            "  fallback_code=$(curl -s -o /dev/null -w \"%{http_code}\" --max-time 5 http://nmcheck.gnome.org/check_network_status.txt 2>/dev/null); " +
-            "  if [ \"$fallback_code\" = \"200\" ] || [ \"$fallback_code\" = \"204\" ]; then echo \"CONNECTIVITY:full\"; " +
-            "  else echo \"CONNECTIVITY:none\"; fi; " +
-            "fi"
+            "PRIMARY_URL=\"http://connectivitycheck.gstatic.com/generate_204\"; " +
+            "FALLBACK_URL=\"http://nmcheck.gnome.org/check_network_status.txt\"; " +
+            "FALLBACK_EXPECTED=\"NetworkManager is online\"; " +
+            "if command -v nmcli >/dev/null 2>&1 && [ \"$(nmcli -t -f RUNNING general 2>/dev/null)\" = \"running\" ]; then " +
+            "  nm_check_enabled=\"unknown\"; " +
+            "  if command -v busctl >/dev/null 2>&1; then " +
+            "    avail=$(busctl get-property org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager ConnectivityCheckAvailable 2>/dev/null | awk '{print $2}'); " +
+            "    en=$(busctl get-property org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager ConnectivityCheckEnabled 2>/dev/null | awk '{print $2}'); " +
+            "    if [ \"$avail\" = \"true\" ] && [ \"$en\" = \"true\" ]; then nm_check_enabled=\"yes\"; " +
+            "    elif [ \"$avail\" = \"false\" ] || [ \"$en\" = \"false\" ]; then nm_check_enabled=\"no\"; fi; " +
+            "  fi; " +
+            "  if [ \"$nm_check_enabled\" = \"yes\" ]; then " +
+            "    nm_res=$(nmcli networking connectivity check 2>/dev/null); " +
+            "    case \"$nm_res\" in " +
+            "      full|portal|limited|none) echo \"CONNECTIVITY:${nm_res}:nm\"; exit 0 ;; " +
+            "    esac; " +
+            "  fi; " +
+            "fi; " +
+            "has_route=0; " +
+            "if command -v ip >/dev/null 2>&1; then " +
+            "  if ip route show default 2>/dev/null | grep -q \"default\"; then has_route=1; " +
+            "  elif ip -6 route show default 2>/dev/null | grep -q \"default\"; then has_route=1; fi; " +
+            "else has_route=1; fi; " +
+            "if [ \"$has_route\" -eq 0 ]; then echo \"CONNECTIVITY:none:route\"; exit 0; fi; " +
+            "if command -v curl >/dev/null 2>&1; then " +
+            "  code=$(curl -s -o /dev/null -w \"%{http_code}\" --max-time 4 \"$PRIMARY_URL\" 2>/dev/null); " +
+            "  if [ \"$code\" = \"204\" ]; then echo \"CONNECTIVITY:full:curl\"; exit 0; fi; " +
+            "  resp=$(curl -s -i --max-time 4 \"$FALLBACK_URL\" 2>/dev/null); " +
+            "  if [ -n \"$resp\" ]; then " +
+            "    fb_code=$(echo \"$resp\" | head -n 1 | awk '{print $2}'); " +
+            "    fb_body=$(echo \"$resp\" | sed '1,/^\r\\{0,1\\}$/d'); " +
+            "    if echo \"$fb_body\" | grep -qF \"$FALLBACK_EXPECTED\"; then echo \"CONNECTIVITY:full:curl\"; exit 0; fi; " +
+            "    if [ -n \"$fb_code\" ] && [ \"$fb_code\" -ge 200 ] && [ \"$fb_code\" -lt 400 ]; then echo \"CONNECTIVITY:portal:curl\"; exit 0; fi; " +
+            "  fi; " +
+            "  echo \"CONNECTIVITY:limited:curl\"; exit 0; " +
+            "fi; " +
+            "echo \"CONNECTIVITY:unknown:none\""
         ]
         stdout: SplitParser {
             onRead: line => {
                 if (line.startsWith("CONNECTIVITY:")) {
-                    var status = line.split(":")[1].trim();
-                    root.hasInternet = (status === "full");
+                    var parts = line.split(":");
+                    var status = parts[1] ? parts[1].trim() : "unknown";
+                    var source = parts[2] ? parts[2].trim() : "unknown";
+
+                    if (status === "full") {
+                        root._consecutiveFailures = 0;
+                        root.connectivityState = "full";
+                        root.connectivitySource = source;
+                    } else if (status === "portal") {
+                        // Captive portal is an active redirect/response; apply immediately without debounce
+                        root._consecutiveFailures = 0;
+                        root.connectivityState = "portal";
+                        root.connectivitySource = source;
+                    } else if (status === "none") {
+                        // No network/route is definitive; apply immediately
+                        root._consecutiveFailures = 0;
+                        root.connectivityState = "none";
+                        root.connectivitySource = source;
+                    } else if (status === "limited") {
+                        // Debounce limited state (requires 2 consecutive failures to prevent flicker)
+                        root._consecutiveFailures++;
+                        if (root._consecutiveFailures >= 2 || !root.hasInternet) {
+                            root.connectivityState = "limited";
+                            root.connectivitySource = source;
+                        }
+                    } else {
+                        root._consecutiveFailures = 0;
+                        root.connectivityState = "unknown";
+                        root.connectivitySource = source;
+                    }
                 }
             }
         }
@@ -370,67 +436,67 @@ PluginComponent {
         id: netProcess
         command: [
             "sh", "-c",
-            "PINNED='" + (root.preferredInterface === "auto" ? "" : root.preferredInterface) + "'; " +
-            "if [ -n \"$PINNED\" ]; then " +
-            "  if [ ! -d \"/sys/class/net/$PINNED\" ]; then exit 0; fi; " +
-            "  awk -v iface=\"${PINNED}:\" '$1 == iface' /proc/net/dev; " +
-            "  actual_state=$(cat \"/sys/class/net/${PINNED}/operstate\" 2>/dev/null || echo \"unknown\"); " +
-            "  echo \"OPSTATE:${PINNED}:${actual_state}\"; " +
-            "  if [ -d \"/sys/class/net/${PINNED}/wireless\" ]; then " +
-            "    ssid=$(iwgetid -r \"${PINNED}\" 2>/dev/null); " +
-            "    if [ -z \"$ssid\" ] && command -v iw >/dev/null 2>&1; then " +
-            "      ssid=$(iw dev \"${PINNED}\" link 2>/dev/null | awk -F'SSID: ' '/SSID:/ {print $2}'); " +
-            "    fi; " +
-            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
-            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${PINNED}:yes:\" | cut -d: -f3- | sed 's/\\\\:/:/g'); " +
-            "    fi; " +
-            "    if [ -n \"$ssid\" ]; then echo \"SSID:${PINNED}:${ssid}\"; fi; " +
-            "  fi; " +
-            "  exit 0; " +
-            "fi; " +
-            "active_iface=\"\"; fallback_iface=\"\"; " +
-            "if command -v ip >/dev/null 2>&1; then " +
-            "  for dev in $(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}'); do " +
-            "    if [ -d \"/sys/class/net/$dev/device\" ]; then " +
-            "      active_iface=\"$dev\"; " +
-            "      break; " +
-            "    fi; " +
-            "  done; " +
-            "fi; " +
-            "if [ -z \"$active_iface\" ]; then " +
-            "  for f in /sys/class/net/*/operstate; do " +
-            "    [ -e \"$f\" ] || continue; " +
-            "    iface=$(basename \"$(dirname \"$f\")\"); " +
-            "    if [ ! -d \"/sys/class/net/$iface/device\" ]; then continue; fi; " +
-            "    state=$(cat \"$f\" 2>/dev/null); " +
-            "    carrier=$(cat \"/sys/class/net/$iface/carrier\" 2>/dev/null); " +
-            "    if [ \"$state\" = \"up\" ] && [ \"$carrier\" = \"1\" ]; then " +
-            "      active_iface=\"$iface\"; " +
-            "      break; " +
-            "    fi; " +
-            "    if [ -z \"$fallback_iface\" ]; then " +
-            "      if [ \"$state\" = \"up\" ] || [ \"$state\" = \"unknown\" ]; then " +
-            "        fallback_iface=\"$iface\"; " +
+            "PINNED=\"$1\"; " +
+            "CACHED_IFACE=\"$2\"; " +
+            "CACHED_SSID=\"$3\"; " +
+            "emit_stats() {" +
+            "  _dev=\"$1\"; " +
+            "  awk -v iface=\"${_dev}:\" '$1 == iface' /proc/net/dev; " +
+            "  _state=$(cat \"/sys/class/net/${_dev}/operstate\" 2>/dev/null || echo \"unknown\"); " +
+            "  echo \"OPSTATE:${_dev}:${_state}\"; " +
+            "  if [ -d \"/sys/class/net/${_dev}/wireless\" ]; then " +
+            "    if [ \"${_dev}\" = \"$CACHED_IFACE\" ] && [ -n \"$CACHED_SSID\" ]; then " +
+            "      echo \"SSID:${_dev}:${CACHED_SSID}\"; " +
+            "    else " +
+            "      ssid=$(iwgetid -r \"${_dev}\" 2>/dev/null); " +
+            "      if [ -z \"$ssid\" ] && command -v iw >/dev/null 2>&1; then " +
+            "        ssid=$(iw dev \"${_dev}\" link 2>/dev/null | awk -F'SSID: ' '/SSID:/ {print $2}'); " +
             "      fi; " +
+            "      if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
+            "        ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${_dev}:yes:\" | cut -d: -f3- | sed 's/\\\\:/:/g'); " +
+            "      fi; " +
+            "      if [ -n \"$ssid\" ]; then echo \"SSID:${_dev}:${ssid}\"; fi; " +
             "    fi; " +
-            "  done; " +
-            "  if [ -z \"$active_iface\" ]; then active_iface=\"$fallback_iface\"; fi; " +
-            "fi; " +
-            "if [ -n \"$active_iface\" ]; then " +
-            "  awk -v iface=\"${active_iface}:\" '$1 == iface' /proc/net/dev; " +
-            "  actual_state=$(cat \"/sys/class/net/${active_iface}/operstate\" 2>/dev/null || echo \"unknown\"); " +
-            "  echo \"OPSTATE:${active_iface}:${actual_state}\"; " +
-            "  if [ -d \"/sys/class/net/${active_iface}/wireless\" ]; then " +
-            "    ssid=$(iwgetid -r \"${active_iface}\" 2>/dev/null); " +
-            "    if [ -z \"$ssid\" ] && command -v iw >/dev/null 2>&1; then " +
-            "      ssid=$(iw dev \"${active_iface}\" link 2>/dev/null | awk -F'SSID: ' '/SSID:/ {print $2}'); " +
-            "    fi; " +
-            "    if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
-            "      ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${active_iface}:yes:\" | cut -d: -f3- | sed 's/\\\\:/:/g'); " +
-            "    fi; " +
-            "    if [ -n \"$ssid\" ]; then echo \"SSID:${active_iface}:${ssid}\"; fi; " +
             "  fi; " +
-            "fi"
+            "}; " +
+            "active_iface=\"\"; " +
+            "if [ -n \"$PINNED\" ]; then " +
+            "  if [ -d \"/sys/class/net/$PINNED\" ]; then active_iface=\"$PINNED\"; fi; " +
+            "else " +
+            "  fallback_iface=\"\"; " +
+            "  if command -v ip >/dev/null 2>&1; then " +
+            "    for dev in $(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}'); do " +
+            "      if [ -d \"/sys/class/net/$dev/device\" ]; then " +
+            "        active_iface=\"$dev\"; " +
+            "        break; " +
+            "      fi; " +
+            "    done; " +
+            "  fi; " +
+            "  if [ -z \"$active_iface\" ]; then " +
+            "    for f in /sys/class/net/*/operstate; do " +
+            "      [ -e \"$f\" ] || continue; " +
+            "      iface=$(basename \"$(dirname \"$f\")\"); " +
+            "      if [ ! -d \"/sys/class/net/$iface/device\" ]; then continue; fi; " +
+            "      state=$(cat \"$f\" 2>/dev/null); " +
+            "      carrier=$(cat \"/sys/class/net/$iface/carrier\" 2>/dev/null); " +
+            "      if [ \"$state\" = \"up\" ] && [ \"$carrier\" = \"1\" ]; then " +
+            "        active_iface=\"$iface\"; " +
+            "        break; " +
+            "      fi; " +
+            "      if [ -z \"$fallback_iface\" ]; then " +
+            "        if [ \"$state\" = \"up\" ] || [ \"$state\" = \"unknown\" ]; then " +
+            "          fallback_iface=\"$iface\"; " +
+            "        fi; " +
+            "      fi; " +
+            "    done; " +
+            "    if [ -z \"$active_iface\" ]; then active_iface=\"$fallback_iface\"; fi; " +
+            "  fi; " +
+            "fi; " +
+            "if [ -n \"$active_iface\" ]; then emit_stats \"$active_iface\"; fi",
+            "_",
+            root.preferredInterface === "auto" ? "" : root.preferredInterface,
+            root.prevIface,
+            (typeof NetworkService !== "undefined" && NetworkService.wifiInterface === root.prevIface) ? NetworkService.currentWifiSSID : ""
         ]
         stdout: SplitParser {
             onRead: line => {
@@ -470,6 +536,9 @@ PluginComponent {
                 root._foundThisCycle = true;
                 root._activeIfaceThisCycle = ifaceName;
                 root._activeSsidThisCycle = ""; // Reset until SSID line overrides
+                if (ifaceName !== root.prevIface) {
+                    root._cachedSsid = ""; // SSID cache belongs to the previous interface
+                }
 
                 var stats = parts[1].trim().split(/\s+/);
                 // columns: rx_bytes rx_packets ... (8 rx fields) tx_bytes tx_packets ...
@@ -540,8 +609,12 @@ PluginComponent {
                 root.uploadSpeed = 0;
                 root.prevRxBytes = -1;
                 root.prevTxBytes = -1;
+                root._cachedSsid = "";
             } else {
-                root.currentNetworkName = root._activeSsidThisCycle || root._activeIfaceThisCycle;
+                if (root._activeSsidThisCycle) {
+                    root._cachedSsid = root._activeSsidThisCycle;
+                }
+                root.currentNetworkName = root._activeSsidThisCycle || root._cachedSsid || root._activeIfaceThisCycle;
 
                 if (root._tempDeltaRx > 0 || root._tempDeltaTx > 0) {
                     var net = root.todayNetworks[root.currentNetworkName] || { rx: 0, tx: 0 };
@@ -566,8 +639,6 @@ PluginComponent {
                                 r = root.todayNetworks[root.selectedNetworkFilter].rx || 0;
                                 t = root.todayNetworks[root.selectedNetworkFilter].tx || 0;
                             }
-                            historyModel.setProperty(0, "rx", r);
-                            historyModel.setProperty(0, "tx", t);
                             historyModel.setProperty(0, "total", r + t);
                         }
                     }
@@ -582,33 +653,19 @@ PluginComponent {
         }
     }
 
-    // ── Delayed init: gives DMS time to inject pluginService ──
-    Timer {
-        id: initTimer
-        interval: 500
-        repeat: true
-        onTriggered: {
-            if (root.pluginService && !root.dataLoaded) {
-                root.loadUsageData();
-                if (root.dataLoaded) {
-                    netProcess.running = true;
-                    initTimer.running = false;
-                }
-                return;
-            }
-        }
+    function initData() {
+        if (!pluginService || dataLoaded) return;
+        loadUsageData();
+        netProcess.running = true;
     }
 
     // ── Load persisted data and start polling ──
-    Component.onCompleted: {
-        if (pluginService) {
-            loadUsageData();
-            if (dataLoaded) {
-                netProcess.running = true;
-            }
-        } else {
-            // pluginService not injected yet — retry after a short delay
-            initTimer.running = true;
+    Component.onCompleted: initData()
+
+    Connections {
+        target: root
+        function onPluginServiceChanged() {
+            initData();
         }
     }
 
@@ -621,7 +678,6 @@ PluginComponent {
     horizontalBarPill: Component {
         Row {
             spacing: Theme.spacingS
-            visible: true
 
             // ── Offline state: differentiate wifi_off vs disconnected ──
             DankIcon {
@@ -642,7 +698,7 @@ PluginComponent {
                 DankIcon {
                     name: "import_export"
                     size: root.iconSize
-                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
+                    color: root.indicatorIconColor(root.totalSpeed, Theme.primary)
                     anchors.verticalCenter: parent.verticalCenter
                     weight: 700
                     Behavior on color {
@@ -667,7 +723,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_upward"
                     size: root.iconSize
-                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText)
+                    color: root.indicatorIconColor(root.uploadSpeed, Theme.error)
                     anchors.verticalCenter: parent.verticalCenter
                     weight: 700
                     
@@ -692,7 +748,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_downward"
                     size: root.iconSize
-                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
+                    color: root.indicatorIconColor(root.downloadSpeed, Theme.primary)
                     anchors.verticalCenter: parent.verticalCenter
                     weight: 700
                     
@@ -714,7 +770,6 @@ PluginComponent {
     verticalBarPill: Component {
         Column {
             spacing: Theme.spacingS
-            visible: true
 
             // ── Offline state: differentiate wifi_off vs disconnected ──
             DankIcon {
@@ -735,7 +790,7 @@ PluginComponent {
                 DankIcon {
                     name: "import_export"
                     size: root.iconSize
-                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.totalSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
+                    color: root.indicatorIconColor(root.totalSpeed, Theme.primary)
                     anchors.horizontalCenter: parent.horizontalCenter
                     weight: 700
 
@@ -761,7 +816,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_upward"
                     size: root.iconSize
-                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.uploadSpeed > 0 ? Theme.error : Theme.surfaceVariantText)
+                    color: root.indicatorIconColor(root.uploadSpeed, Theme.error)
                     anchors.horizontalCenter: parent.horizontalCenter
                     weight: 700
                     
@@ -786,7 +841,7 @@ PluginComponent {
                 DankIcon {
                     name: "arrow_downward"
                     size: root.iconSize
-                    color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : (root.downloadSpeed > 0 ? Theme.primary : Theme.surfaceVariantText)
+                    color: root.indicatorIconColor(root.downloadSpeed, Theme.primary)
                     anchors.horizontalCenter: parent.horizontalCenter
                     weight: 700
                     
@@ -807,7 +862,6 @@ PluginComponent {
     // ── Popout with detailed network stats ──
     popoutContent: Component {
         PopoutComponent {
-            id: popoutColumn
             showCloseButton: false
 
             onVisibleChanged: {
@@ -856,7 +910,7 @@ PluginComponent {
                             }
                         }
 
-                        // ── No Internet banner (connected locally but no internet) ──
+                        // ── No Internet / Portal banner (connected locally but no/restricted internet) ──
                         StyledRect {
                             visible: root.interfaceFound && !root.hasInternet
                             width: parent.width
@@ -871,7 +925,7 @@ PluginComponent {
 
                                 DankIcon {
                                     id: noInternetIcon
-                                    name: "android_wifi_3_bar_alert"
+                                    name: root.connectivityState === "portal" ? "portal" : "android_wifi_3_bar_alert"
                                     size: Theme.iconSizeLarge
                                     color: Theme.warning
                                     anchors.verticalCenter: parent.verticalCenter
@@ -884,7 +938,7 @@ PluginComponent {
                                     spacing: 2
 
                                     StyledText {
-                                        text: "No internet access"
+                                        text: root.connectivityState === "portal" ? "Sign-in required" : "No internet access"
                                         font.pixelSize: Theme.fontSizeMedium
                                         font.weight: Font.Bold
                                         color: Theme.warning
@@ -892,7 +946,7 @@ PluginComponent {
                                         elide: Text.ElideRight
                                     }
                                     StyledText {
-                                        text: "No internet access"
+                                        text: root.connectivityState === "portal" ? "This network requires you to log in" : "Check your router or internet connection"
                                         font.pixelSize: Theme.fontSizeSmall
                                         color: Theme.surfaceVariantText
                                         width: parent.width
@@ -1245,10 +1299,7 @@ PluginComponent {
                             required property string date
                             required property string label
                             required property real total
-                            required property real rx
-                            required property real tx
-                            required property int index
-                            
+
                             width: historyListView.width - historyScrollBar.implicitWidth - 3
                             height: Math.max(dims.rowMinHeight, historyRowContent.implicitHeight + Theme.spacingS * 2)
                             radius: Theme.cornerRadius / 2
@@ -1322,33 +1373,6 @@ PluginComponent {
                         anchors.bottom: parent.bottom
                         width: parent.width
                         height: totalRow.height + Theme.spacingS
-                        opacity: 0
-                        transform: Translate { id: totalRowTranslate; y: Theme.spacingS }
-
-                        Component.onCompleted: {
-                            totalRowEntranceAnim.start();
-                        }
-
-                        SequentialAnimation {
-                            id: totalRowEntranceAnim
-                            PauseAnimation { duration: root.getHistoryEntries().length * 25 }
-                            ParallelAnimation {
-                                NumberAnimation {
-                                    target: totalSection
-                                    property: "opacity"
-                                    from: 0; to: 1
-                                    duration: 120
-                                    easing.type: Easing.OutCubic
-                                }
-                                NumberAnimation {
-                                    target: totalRowTranslate
-                                    property: "y"
-                                    from: 8; to: 0
-                                    duration: 120
-                                    easing.type: Easing.OutCubic
-                                }
-                            }
-                        }
 
                         StyledRect {
                             id: totalRow
@@ -1380,7 +1404,7 @@ PluginComponent {
 
                                 StyledText {
                                     id: overallLabel
-                                    text: root.selectedNetworkFilter ? root.formatBytes(root.getOverallUsage().total) : ""
+                                    text: root.selectedNetworkFilter ? root.formatBytes(root.getOverallUsage()) : ""
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.weight: Font.Bold
                                     color: Theme.surfaceText
