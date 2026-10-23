@@ -67,7 +67,7 @@ The plugin intelligently combines Linux's built-in system files with standard ne
 | **Internet Check** | `nmcli` / Route Gate / `curl` | Verifies actual internet availability using a layered system: NetworkManager connectivity check, instant default route gate, and a hardened dual-endpoint curl probe (with captive portal detection). |
 | **Persistence** | DMS Plugin State API | Saves daily usage per network across reboots within a 30-day rolling window. |
 
-It automatically finds your active network interface by parsing routing tables (`ip route`), ignoring loopback and virtual interfaces (docker, veth, etc.), unless you explicitly pin an interface in the settings.
+It automatically finds your active network interface by reading the kernel routing table (`/proc/net/route`), ignoring loopback and virtual interfaces (docker, veth, etc.), unless you explicitly pin an interface in the settings.
 
 ## 📄 License
 

@@ -326,7 +326,7 @@ PluginComponent {
             root._tempDeltaRx = 0;
             root._tempDeltaTx = 0;
             root._ssidPollCount = (root._ssidPollCount + 1) % 15;
-            netProcess.running = true;
+            if (!ssidProcess.running) root.sampleNetwork();
         }
     }
 
@@ -434,234 +434,266 @@ PluginComponent {
         }
     }
 
-    // ── Process: reads /proc/net/dev + operstate ──
+    // ── Network sampling: reads /proc + /sys through FileView (no process per tick) ──
+    // blockAllReads (not blockLoading) so text() after reload() or a path change returns fresh content, not the previous read
+    FileView { id: procNetDev; path: "/proc/net/dev"; blockAllReads: true; printErrors: false }
+    FileView { id: procNetRoute; path: "/proc/net/route"; blockAllReads: true; printErrors: false }
+    FileView { id: sysFile; blockAllReads: true; printErrors: false }
+
+    // Returns "" when the file is missing or unreadable
+    function readSysFile(path) {
+        if (sysFile.path === path) sysFile.reload();
+        else sysFile.path = path;
+        return (sysFile.text() || "").trim();
+    }
+
+    function ifaceExists(dev) { return readSysFile("/sys/class/net/" + dev + "/uevent") !== ""; }
+    function ifaceIsPhysical(dev) { return readSysFile("/sys/class/net/" + dev + "/device/uevent") !== ""; }
+    function ifaceIsWireless(dev) { return readSysFile("/sys/class/net/" + dev + "/uevent").indexOf("DEVTYPE=wlan") !== -1; }
+
+    function pickInterface(devLines) {
+        if (root.preferredInterface !== "auto") {
+            return ifaceExists(root.preferredInterface) ? root.preferredInterface : "";
+        }
+
+        // Default routes (destination and mask 00000000), first physical one wins
+        procNetRoute.reload();
+        var routes = (procNetRoute.text() || "").split("\n");
+        for (var i = 1; i < routes.length; i++) {
+            var cols = routes[i].trim().split(/\s+/);
+            if (cols.length > 7 && cols[1] === "00000000" && cols[7] === "00000000" && ifaceIsPhysical(cols[0])) {
+                return cols[0];
+            }
+        }
+
+        // No usable default route: first physical interface that is up with carrier, else first up/unknown one
+        var names = Object.keys(devLines).sort();
+        var fallback = "";
+        for (var j = 0; j < names.length; j++) {
+            var dev = names[j];
+            if (!ifaceIsPhysical(dev)) continue;
+            var state = readSysFile("/sys/class/net/" + dev + "/operstate");
+            if (state === "up" && readSysFile("/sys/class/net/" + dev + "/carrier") === "1") return dev;
+            if (!fallback && (state === "up" || state === "unknown")) fallback = dev;
+        }
+        return fallback;
+    }
+
+    function sampleNetwork() {
+        // Captured before the cycle mutates prevIface
+        var cachedIface = root.prevIface;
+        var cachedSsid = (typeof NetworkService !== "undefined" && NetworkService.wifiInterface === root.prevIface && NetworkService.currentWifiSSID)
+            ? NetworkService.currentWifiSSID
+            : (root._ssidPollCount === 0 ? "" : root._cachedSsid);
+
+        procNetDev.reload();
+        var devLines = {};
+        var lines = (procNetDev.text() || "").split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var idx = lines[i].indexOf(":");
+            if (idx > 0) devLines[lines[i].substring(0, idx).trim()] = lines[i];
+        }
+
+        var dev = pickInterface(devLines);
+        if (!dev) {
+            root.finishCycle();
+            return;
+        }
+
+        if (devLines[dev]) root.handleStatLine(devLines[dev]);
+        root.handleStatLine("OPSTATE:" + dev + ":" + (readSysFile("/sys/class/net/" + dev + "/operstate") || "unknown"));
+
+        if (!ifaceIsWireless(dev)) {
+            root.finishCycle();
+        } else if (dev === cachedIface && cachedSsid) {
+            root.handleStatLine("SSID:" + dev + ":" + cachedSsid);
+            root.finishCycle();
+        } else {
+            // Only an uncached SSID lookup needs a process
+            ssidProcess.iface = dev;
+            ssidProcess.running = true;
+        }
+    }
+
+    function handleStatLine(line) {
+        if (line.startsWith("SSID:")) {
+            var sparts = line.split(":");
+            var sIface = sparts[1];
+            var sSsid = sparts.slice(2).join(":").trim(); // Handle SSIDs with colons
+            if (sIface === root._activeIfaceThisCycle) {
+                root._activeSsidThisCycle = sSsid || "unknown";
+            }
+            return;
+        }
+
+        // Handle operstate lines — they come after the /proc/net/dev output
+        if (line.startsWith("OPSTATE:")) {
+            var oparts = line.split(":");
+            var oIface = oparts[1];
+            var oState = oparts[2];
+            // If this is the interface we picked this cycle, mark offline when down
+            if (oIface === root._activeIfaceThisCycle && oState === "down") {
+                root._foundThisCycle = false;
+            }
+            return;
+        }
+
+        // Already found our interface this cycle — skip remaining lines
+        if (root._foundThisCycle) return;
+
+        // Lines look like: "  eth0: 12345 ... 67890 ..."
+        var trimmed = line.trim();
+        if (trimmed.indexOf(":") === -1) return;
+
+        var parts = trimmed.split(":");
+        var ifaceName = parts[0].trim();
+
+        // Lock in this interface for the cycle
+        root._foundThisCycle = true;
+        root._activeIfaceThisCycle = ifaceName;
+        root._activeSsidThisCycle = ""; // Reset until SSID line overrides
+        if (ifaceName !== root.prevIface) {
+            root._cachedSsid = ""; // SSID cache belongs to the previous interface
+        }
+
+        var stats = parts[1].trim().split(/\s+/);
+        // columns: rx_bytes rx_packets ... (8 rx fields) tx_bytes tx_packets ...
+        var rxBytes = parseFloat(stats[0]) || 0;
+        var txBytes = parseFloat(stats[8]) || 0;
+
+        // ── First poll after loading saved data: recover gap ──
+        if (root.firstPollAfterLoad) {
+            root.firstPollAfterLoad = false;
+            var savedRx = root.usageData.lastRxBytes || -1;
+            var savedTx = root.usageData.lastTxBytes || -1;
+            var savedIface = root.usageData.lastInterface || "";
+
+            // Only recover gap if same interface (different interface = unreliable counters)
+            if (savedRx >= 0 && savedTx >= 0 && savedIface === ifaceName) {
+                // Counters grew since last save → data accumulated while plugin was off
+                var gapRx = rxBytes - savedRx;
+                var gapTx = txBytes - savedTx;
+                if (gapRx >= 0 && gapTx >= 0) {
+                    root._tempDeltaRx = gapRx;
+                    root._tempDeltaTx = gapTx;
+                    root.todayRx += gapRx;
+                    root.todayTx += gapTx;
+                }
+                // If negative, counter reset (reboot) — don't add gap, start fresh delta
+            }
+            root.prevRxBytes = rxBytes;
+            root.prevTxBytes = txBytes;
+            root.prevIface = ifaceName;
+            // Note: Gap recovery is saved when process exits (so SSID is ready)
+            return;
+        }
+
+        // ── Normal delta accumulation ──
+        if (root.prevRxBytes >= 0 && root.prevTxBytes >= 0 && root.prevIface === ifaceName) {
+            var deltaRx = rxBytes - root.prevRxBytes;
+            var deltaTx = txBytes - root.prevTxBytes;
+            var elapsed = root.updateInterval;
+
+            // Speed calculation
+            root.downloadSpeed = Math.max(0, deltaRx / elapsed);
+            root.uploadSpeed = Math.max(0, deltaTx / elapsed);
+
+            // Accumulate to daily total (only positive deltas)
+            root._tempDeltaRx = Math.max(0, deltaRx);
+            root._tempDeltaTx = Math.max(0, deltaTx);
+            
+            if (deltaRx > 0) root.todayRx += deltaRx;
+            if (deltaTx > 0) root.todayTx += deltaTx;
+        } else if (root.prevIface !== ifaceName) {
+            // Interface changed, reset speeds to avoid massive spike
+            root.downloadSpeed = 0;
+            root.uploadSpeed = 0;
+        }
+
+        root.prevRxBytes = rxBytes;
+        root.prevTxBytes = txBytes;
+        root.prevIface = ifaceName;
+        // Wait for exit to save so we have the SSID
+    }
+
+    function finishCycle() {
+        // Update interfaceFound ONLY after the full read completes (no flicker)
+        root.interfaceFound = root._foundThisCycle;
+
+        if (!root._foundThisCycle) {
+            root.downloadSpeed = 0;
+            root.uploadSpeed = 0;
+            root.prevRxBytes = -1;
+            root.prevTxBytes = -1;
+            root._cachedSsid = "";
+        } else {
+            if (root._activeSsidThisCycle) {
+                root._cachedSsid = root._activeSsidThisCycle;
+            }
+            root.currentNetworkName = root._activeSsidThisCycle || root._cachedSsid || root._activeIfaceThisCycle;
+
+            if (root._tempDeltaRx > 0 || root._tempDeltaTx > 0) {
+                var net = root.todayNetworks[root.currentNetworkName] || { rx: 0, tx: 0 };
+                net.rx += root._tempDeltaRx;
+                net.tx += root._tempDeltaTx;
+                // QML requires re-assigning the object to trigger property bindings for dicts sometimes, 
+                // or modifying it directly might not persist if not careful.
+                var newDict = JSON.parse(JSON.stringify(root.todayNetworks));
+                newDict[root.currentNetworkName] = net;
+                root.todayNetworks = newDict;
+
+                // Update the model dynamically without rebuilding if expanded
+                if (root.historyExpanded && historyModel.count > 0) {
+                    var topEntry = historyModel.get(0);
+                    if (topEntry.date === root.todayKey) {
+                        var r = 0;
+                        var t = 0;
+                        if (root.selectedNetworkFilter === "All") {
+                            r = root.todayRx;
+                            t = root.todayTx;
+                        } else if (root.todayNetworks[root.selectedNetworkFilter]) {
+                            r = root.todayNetworks[root.selectedNetworkFilter].rx || 0;
+                            t = root.todayNetworks[root.selectedNetworkFilter].tx || 0;
+                        }
+                        historyModel.setProperty(0, "total", r + t);
+                    }
+                }
+            }
+
+            root.unsavedBytes += (root._tempDeltaRx + root._tempDeltaTx);
+
+            if (root.unsavedBytes >= 50 * 1024 * 1024) {
+                root.saveUsageData();
+            }
+        }
+    }
+
+    // ── Process: SSID lookup, only when not cached or provided by NetworkService ──
     Process {
-        id: netProcess
+        id: ssidProcess
+        property string iface: ""
         command: [
             "sh", "-c",
-            "PINNED=\"$1\"; " +
-            "CACHED_IFACE=\"$2\"; " +
-            "CACHED_SSID=\"$3\"; " +
-            "emit_stats() {" +
-            "  _dev=\"$1\"; " +
-            "  awk -v iface=\"${_dev}:\" '$1 == iface' /proc/net/dev; " +
-            "  _state=$(cat \"/sys/class/net/${_dev}/operstate\" 2>/dev/null || echo \"unknown\"); " +
-            "  echo \"OPSTATE:${_dev}:${_state}\"; " +
-            "  if [ -d \"/sys/class/net/${_dev}/wireless\" ]; then " +
-            "    if [ \"${_dev}\" = \"$CACHED_IFACE\" ] && [ -n \"$CACHED_SSID\" ]; then " +
-            "      echo \"SSID:${_dev}:${CACHED_SSID}\"; " +
-            "    else " +
-            "      ssid=$(iwgetid -r \"${_dev}\" 2>/dev/null); " +
-            "      if [ -z \"$ssid\" ] && command -v iw >/dev/null 2>&1; then " +
-            "        ssid=$(iw dev \"${_dev}\" link 2>/dev/null | awk -F'SSID: ' '/SSID:/ {print $2}'); " +
-            "      fi; " +
-            "      if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
-            "        ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^${_dev}:yes:\" | cut -d: -f3- | sed 's/\\\\:/:/g'); " +
-            "      fi; " +
-            "      if [ -n \"$ssid\" ]; then echo \"SSID:${_dev}:${ssid}\"; fi; " +
-            "    fi; " +
-            "  fi; " +
-            "}; " +
-            "active_iface=\"\"; " +
-            "if [ -n \"$PINNED\" ]; then " +
-            "  if [ -d \"/sys/class/net/$PINNED\" ]; then active_iface=\"$PINNED\"; fi; " +
-            "else " +
-            "  fallback_iface=\"\"; " +
-            "  if command -v ip >/dev/null 2>&1; then " +
-            "    for dev in $(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}'); do " +
-            "      if [ -d \"/sys/class/net/$dev/device\" ]; then " +
-            "        active_iface=\"$dev\"; " +
-            "        break; " +
-            "      fi; " +
-            "    done; " +
-            "  fi; " +
-            "  if [ -z \"$active_iface\" ]; then " +
-            "    for f in /sys/class/net/*/operstate; do " +
-            "      [ -e \"$f\" ] || continue; " +
-            "      iface=$(basename \"$(dirname \"$f\")\"); " +
-            "      if [ ! -d \"/sys/class/net/$iface/device\" ]; then continue; fi; " +
-            "      state=$(cat \"$f\" 2>/dev/null); " +
-            "      carrier=$(cat \"/sys/class/net/$iface/carrier\" 2>/dev/null); " +
-            "      if [ \"$state\" = \"up\" ] && [ \"$carrier\" = \"1\" ]; then " +
-            "        active_iface=\"$iface\"; " +
-            "        break; " +
-            "      fi; " +
-            "      if [ -z \"$fallback_iface\" ]; then " +
-            "        if [ \"$state\" = \"up\" ] || [ \"$state\" = \"unknown\" ]; then " +
-            "          fallback_iface=\"$iface\"; " +
-            "        fi; " +
-            "      fi; " +
-            "    done; " +
-            "    if [ -z \"$active_iface\" ]; then active_iface=\"$fallback_iface\"; fi; " +
-            "  fi; " +
+            "ssid=$(iwgetid -r \"$1\" 2>/dev/null); " +
+            "if [ -z \"$ssid\" ] && command -v iw >/dev/null 2>&1; then " +
+            "  ssid=$(iw dev \"$1\" link 2>/dev/null | awk -F'SSID: ' '/SSID:/ {print $2}'); " +
             "fi; " +
-            "if [ -n \"$active_iface\" ]; then emit_stats \"$active_iface\"; fi",
-            "_",
-            root.preferredInterface === "auto" ? "" : root.preferredInterface,
-            root.prevIface,
-            (typeof NetworkService !== "undefined" && NetworkService.wifiInterface === root.prevIface && NetworkService.currentWifiSSID)
-                ? NetworkService.currentWifiSSID
-                : (root._ssidPollCount === 0 ? "" : root._cachedSsid)
+            "if [ -z \"$ssid\" ] && command -v nmcli >/dev/null 2>&1; then " +
+            "  ssid=$(nmcli -t -c no -f device,active,ssid dev wifi 2>/dev/null | grep \"^$1:yes:\" | cut -d: -f3- | sed 's/\\\\:/:/g'); " +
+            "fi; " +
+            "if [ -n \"$ssid\" ]; then echo \"SSID:$1:$ssid\"; fi",
+            "_", ssidProcess.iface
         ]
         stdout: SplitParser {
-            onRead: line => {
-                if (line.startsWith("SSID:")) {
-                    var sparts = line.split(":");
-                    var sIface = sparts[1];
-                    var sSsid = sparts.slice(2).join(":").trim(); // Handle SSIDs with colons
-                    if (sIface === root._activeIfaceThisCycle) {
-                        root._activeSsidThisCycle = sSsid || "unknown";
-                    }
-                    return;
-                }
-
-                // Handle operstate lines — they come after the /proc/net/dev output
-                if (line.startsWith("OPSTATE:")) {
-                    var oparts = line.split(":");
-                    var oIface = oparts[1];
-                    var oState = oparts[2];
-                    // If this is the interface we picked this cycle, mark offline when down
-                    if (oIface === root._activeIfaceThisCycle && oState === "down") {
-                        root._foundThisCycle = false;
-                    }
-                    return;
-                }
-
-                // Already found our interface this cycle — skip remaining lines
-                if (root._foundThisCycle) return;
-
-                // Lines look like: "  eth0: 12345 ... 67890 ..."
-                var trimmed = line.trim();
-                if (trimmed.indexOf(":") === -1) return;
-
-                var parts = trimmed.split(":");
-                var ifaceName = parts[0].trim();
-
-                // Lock in this interface for the cycle
-                root._foundThisCycle = true;
-                root._activeIfaceThisCycle = ifaceName;
-                root._activeSsidThisCycle = ""; // Reset until SSID line overrides
-                if (ifaceName !== root.prevIface) {
-                    root._cachedSsid = ""; // SSID cache belongs to the previous interface
-                }
-
-                var stats = parts[1].trim().split(/\s+/);
-                // columns: rx_bytes rx_packets ... (8 rx fields) tx_bytes tx_packets ...
-                var rxBytes = parseFloat(stats[0]) || 0;
-                var txBytes = parseFloat(stats[8]) || 0;
-
-                // ── First poll after loading saved data: recover gap ──
-                if (root.firstPollAfterLoad) {
-                    root.firstPollAfterLoad = false;
-                    var savedRx = root.usageData.lastRxBytes || -1;
-                    var savedTx = root.usageData.lastTxBytes || -1;
-                    var savedIface = root.usageData.lastInterface || "";
-
-                    // Only recover gap if same interface (different interface = unreliable counters)
-                    if (savedRx >= 0 && savedTx >= 0 && savedIface === ifaceName) {
-                        // Counters grew since last save → data accumulated while plugin was off
-                        var gapRx = rxBytes - savedRx;
-                        var gapTx = txBytes - savedTx;
-                        if (gapRx >= 0 && gapTx >= 0) {
-                            root._tempDeltaRx = gapRx;
-                            root._tempDeltaTx = gapTx;
-                            root.todayRx += gapRx;
-                            root.todayTx += gapTx;
-                        }
-                        // If negative, counter reset (reboot) — don't add gap, start fresh delta
-                    }
-                    root.prevRxBytes = rxBytes;
-                    root.prevTxBytes = txBytes;
-                    root.prevIface = ifaceName;
-                    // Note: Gap recovery is saved when process exits (so SSID is ready)
-                    return;
-                }
-
-                // ── Normal delta accumulation ──
-                if (root.prevRxBytes >= 0 && root.prevTxBytes >= 0 && root.prevIface === ifaceName) {
-                    var deltaRx = rxBytes - root.prevRxBytes;
-                    var deltaTx = txBytes - root.prevTxBytes;
-                    var elapsed = root.updateInterval;
-
-                    // Speed calculation
-                    root.downloadSpeed = Math.max(0, deltaRx / elapsed);
-                    root.uploadSpeed = Math.max(0, deltaTx / elapsed);
-
-                    // Accumulate to daily total (only positive deltas)
-                    root._tempDeltaRx = Math.max(0, deltaRx);
-                    root._tempDeltaTx = Math.max(0, deltaTx);
-                    
-                    if (deltaRx > 0) root.todayRx += deltaRx;
-                    if (deltaTx > 0) root.todayTx += deltaTx;
-                } else if (root.prevIface !== ifaceName) {
-                    // Interface changed, reset speeds to avoid massive spike
-                    root.downloadSpeed = 0;
-                    root.uploadSpeed = 0;
-                }
-
-                root.prevRxBytes = rxBytes;
-                root.prevTxBytes = txBytes;
-                root.prevIface = ifaceName;
-                // Wait for exit to save so we have the SSID
-            }
+            onRead: line => root.handleStatLine(line)
         }
-        onExited: exitCode => {
-            // Update interfaceFound ONLY after the full read completes (no flicker)
-            root.interfaceFound = root._foundThisCycle;
-
-            if (!root._foundThisCycle) {
-                root.downloadSpeed = 0;
-                root.uploadSpeed = 0;
-                root.prevRxBytes = -1;
-                root.prevTxBytes = -1;
-                root._cachedSsid = "";
-            } else {
-                if (root._activeSsidThisCycle) {
-                    root._cachedSsid = root._activeSsidThisCycle;
-                }
-                root.currentNetworkName = root._activeSsidThisCycle || root._cachedSsid || root._activeIfaceThisCycle;
-
-                if (root._tempDeltaRx > 0 || root._tempDeltaTx > 0) {
-                    var net = root.todayNetworks[root.currentNetworkName] || { rx: 0, tx: 0 };
-                    net.rx += root._tempDeltaRx;
-                    net.tx += root._tempDeltaTx;
-                    // QML requires re-assigning the object to trigger property bindings for dicts sometimes, 
-                    // or modifying it directly might not persist if not careful.
-                    var newDict = JSON.parse(JSON.stringify(root.todayNetworks));
-                    newDict[root.currentNetworkName] = net;
-                    root.todayNetworks = newDict;
-
-                    // Update the model dynamically without rebuilding if expanded
-                    if (root.historyExpanded && historyModel.count > 0) {
-                        var topEntry = historyModel.get(0);
-                        if (topEntry.date === root.todayKey) {
-                            var r = 0;
-                            var t = 0;
-                            if (root.selectedNetworkFilter === "All") {
-                                r = root.todayRx;
-                                t = root.todayTx;
-                            } else if (root.todayNetworks[root.selectedNetworkFilter]) {
-                                r = root.todayNetworks[root.selectedNetworkFilter].rx || 0;
-                                t = root.todayNetworks[root.selectedNetworkFilter].tx || 0;
-                            }
-                            historyModel.setProperty(0, "total", r + t);
-                        }
-                    }
-                }
-
-                root.unsavedBytes += (root._tempDeltaRx + root._tempDeltaTx);
-
-                if (root.unsavedBytes >= 50 * 1024 * 1024) {
-                    root.saveUsageData();
-                }
-            }
-        }
+        onExited: root.finishCycle()
     }
 
     function initData() {
         if (!pluginService || dataLoaded) return;
         loadUsageData();
-        netProcess.running = true;
+        root.sampleNetwork();
     }
 
     // ── Load persisted data and start polling ──
