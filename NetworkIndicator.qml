@@ -31,6 +31,7 @@ PluginComponent {
     property string displayMode: pluginData.displayMode || "separate"
     property string preferredInterface: pluginData.preferredInterface || "auto"
     property bool checkConnectivity: pluginData.checkConnectivity !== undefined ? pluginData.checkConnectivity : true
+    readonly property real pillTextSize: root.textSize ?? Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
     onCheckConnectivityChanged: _consecutiveFailures = 0
 
     // ── Internal state ──
@@ -708,7 +709,7 @@ PluginComponent {
 
                 StyledText {
                     text: root.formatSpeed(root.totalSpeed)
-                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    font.pixelSize: root.pillTextSize
                     color: Theme.surfaceText
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -733,7 +734,7 @@ PluginComponent {
                 }
                 StyledText {
                     text: root.formatSpeed(root.uploadSpeed)
-                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    font.pixelSize: root.pillTextSize
                     color: Theme.surfaceText
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -758,7 +759,7 @@ PluginComponent {
                 }
                 StyledText {
                     text: root.formatSpeed(root.downloadSpeed)
-                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    font.pixelSize: root.pillTextSize
                     color: Theme.surfaceText
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -802,7 +803,7 @@ PluginComponent {
                 StyledText {
                     text: root.formatSpeed(root.totalSpeed).replace(" ", "\n")
                     horizontalAlignment: Text.AlignHCenter
-                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    font.pixelSize: root.pillTextSize
                     color: (!root.hasInternet && root.interfaceFound) ? Theme.warning : Theme.surfaceText
                 }
             }
@@ -827,7 +828,7 @@ PluginComponent {
                 StyledText {
                     text: root.formatSpeed(root.uploadSpeed).replace(" ", "\n")
                     horizontalAlignment: Text.AlignHCenter
-                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    font.pixelSize: root.pillTextSize
                     color: Theme.surfaceText
                 }
             }
@@ -852,7 +853,7 @@ PluginComponent {
                 StyledText {
                     text: root.formatSpeed(root.downloadSpeed).replace(" ", "\n")
                     horizontalAlignment: Text.AlignHCenter
-                    font.pixelSize: Theme.barTextSize(root.barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
+                    font.pixelSize: root.pillTextSize
                     color: Theme.surfaceText
                 }
             }
@@ -916,7 +917,7 @@ PluginComponent {
                             width: parent.width
                             height: noInternetBannerCol.implicitHeight + Theme.spacingM * 2
                             radius: Theme.cornerRadius
-                            color: Qt.rgba(Theme.warning.r, Theme.warning.g, Theme.warning.b, 0.08)
+                            color: Theme.withAlpha(Theme.warning, 0.08)
 
                             Row {
                                 anchors.fill: parent
@@ -963,8 +964,8 @@ PluginComponent {
                             height: offlineBannerCol.implicitHeight + Theme.spacingM * 2
                             radius: Theme.cornerRadius
                             color: offlineBannerMouse.containsMouse
-                                ? Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.12)
-                                : Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.06)
+                                ? Theme.withAlpha(Theme.error, 0.12)
+                                : Theme.withAlpha(Theme.error, 0.06)
 
                             Behavior on color {
                                 ColorAnimation { duration: 150; easing.type: Easing.OutCubic }
@@ -1042,7 +1043,7 @@ PluginComponent {
                                 width: (parent.width - Theme.spacingS) / 2
                                 implicitHeight: Math.max(dims.cardMinHeight, downloadCol.implicitHeight + Theme.spacingM * 2)
                                 radius: Theme.cornerRadius
-                                color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
+                                color: Theme.withAlpha(Theme.primary, 0.2)
 
                                 Column {
                                     id: downloadCol
@@ -1070,7 +1071,7 @@ PluginComponent {
                                 width: (parent.width - Theme.spacingS) / 2
                                 implicitHeight: Math.max(dims.cardMinHeight, uploadCol.implicitHeight + Theme.spacingM * 2)
                                 radius: Theme.cornerRadius
-                                color: Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.2)
+                                color: Theme.withAlpha(Theme.error, 0.2)
 
                                 Column {
                                     id: uploadCol
@@ -1100,7 +1101,7 @@ PluginComponent {
                         width: parent.width
                         implicitHeight: Math.max(dims.cardMinHeight, dataUsedRow.implicitHeight + Theme.spacingM * 2)
                         radius: Theme.cornerRadius
-                        color: Qt.rgba(Theme.surfaceContainerHigh.r, Theme.surfaceContainerHigh.g, Theme.surfaceContainerHigh.b, 0.5)
+                        color: Theme.withAlpha(Theme.surfaceContainerHigh, 0.5)
 
                         Row {
                             id: dataUsedRow
@@ -1230,8 +1231,8 @@ PluginComponent {
                                     width: filterText.implicitWidth + Theme.spacingM * 2
                                     radius: height / 2
                                     color: root.selectedNetworkFilter === filterChip.name 
-                                        ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2)
-                                        : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
+                                        ? Theme.withAlpha(Theme.primary, 0.2)
+                                        : Theme.withAlpha(Theme.surfaceVariantText, 0.1)
                                     border.width: root.selectedNetworkFilter === filterChip.name ? 1 : 0
                                     border.color: Theme.primary
 
@@ -1283,12 +1284,7 @@ PluginComponent {
                             contentItem: Rectangle {
                                 implicitWidth: Theme.spacingS
                                 radius: implicitWidth / 2
-                                color: Qt.rgba(
-                                    Theme.surfaceVariantText.r,
-                                    Theme.surfaceVariantText.g,
-                                    Theme.surfaceVariantText.b,
-                                    historyScrollBar.active ? 0.5 : 0.3
-                                )
+                                color: Theme.withAlpha(Theme.surfaceVariantText, historyScrollBar.active ? 0.5 : 0.3)
 
                                 Behavior on color { ColorAnimation { duration: 150 } }
                             }
@@ -1304,8 +1300,8 @@ PluginComponent {
                             height: Math.max(dims.rowMinHeight, historyRowContent.implicitHeight + Theme.spacingS * 2)
                             radius: Theme.cornerRadius / 2
                             color: historyRow.date === root.todayKey
-                                ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08)
-                                : Qt.rgba(Theme.surfaceVariantText.r, Theme.surfaceVariantText.g, Theme.surfaceVariantText.b, 0.1)
+                                ? Theme.withAlpha(Theme.primary, 0.08)
+                                : Theme.withAlpha(Theme.surfaceVariantText, 0.1)
 
                             Row {
                                 id: historyRowContent
@@ -1336,9 +1332,7 @@ PluginComponent {
                                         width: parent.width
                                         height: parent.height
                                         radius: height / 2
-                                        color: Qt.rgba(Theme.surfaceVariantText.r,
-                                                       Theme.surfaceVariantText.g,
-                                                       Theme.surfaceVariantText.b, 0.1)
+                                        color: Theme.withAlpha(Theme.surfaceVariantText, 0.1)
                                     }
 
                                     StyledRect {
@@ -1380,7 +1374,7 @@ PluginComponent {
                             width: parent.width
                             height: Math.max(dims.rowMinHeight, totalRowContent.implicitHeight + Theme.spacingS * 2)
                             radius: Theme.cornerRadius / 2
-                            color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.08)
+                            color: Theme.withAlpha(Theme.surfaceText, 0.08)
 
                             Row {
                                 id: totalRowContent
