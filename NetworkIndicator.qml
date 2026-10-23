@@ -46,6 +46,7 @@ PluginComponent {
     property string _activeIfaceThisCycle: "" // interface name found this cycle
     property string _activeSsidThisCycle: ""  // ssid found this cycle
     property string _cachedSsid: ""           // cached SSID across cycles to avoid redundant lookups
+    property int _ssidPollCount: 0            // forces a fresh SSID lookup every 15 polls (catches same-iface network switches)
     property string connectivityState: "full" // "full" | "portal" | "limited" | "none" | "unknown"
     property string connectivitySource: "init" // "nm" | "curl" | "route" | "init"
     property int _consecutiveFailures: 0      // debouncing counter for offline/limited state
@@ -324,6 +325,7 @@ PluginComponent {
             root._activeSsidThisCycle = "";
             root._tempDeltaRx = 0;
             root._tempDeltaTx = 0;
+            root._ssidPollCount = (root._ssidPollCount + 1) % 15;
             netProcess.running = true;
         }
     }
@@ -497,7 +499,9 @@ PluginComponent {
             "_",
             root.preferredInterface === "auto" ? "" : root.preferredInterface,
             root.prevIface,
-            (typeof NetworkService !== "undefined" && NetworkService.wifiInterface === root.prevIface) ? NetworkService.currentWifiSSID : ""
+            (typeof NetworkService !== "undefined" && NetworkService.wifiInterface === root.prevIface && NetworkService.currentWifiSSID)
+                ? NetworkService.currentWifiSSID
+                : (root._ssidPollCount === 0 ? "" : root._cachedSsid)
         ]
         stdout: SplitParser {
             onRead: line => {
